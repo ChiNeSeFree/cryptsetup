@@ -280,6 +280,19 @@ int device_open(struct device *device, int flags)
 	return device_open_internal(device, flags);
 }
 
+int device_open_excl(struct device *device, int flags)
+{
+	struct stat st;
+
+	if (stat(device_path(device), &st))
+		return -EINVAL;
+	if (S_ISBLK(st.st_mode))
+		flags |= O_EXCL;
+
+	assert(!device_locked(device->lh));
+	return device_open_internal(device, flags);
+}
+
 int device_open_locked(struct device *device, int flags)
 {
 	assert(!crypt_metadata_locking_enabled() || device_locked(device->lh));
@@ -495,24 +508,37 @@ int device_read_ahead(struct device *device, uint32_t *read_ahead)
 }
 
 /* Get data size in bytes */
-int device_size(struct device *device, uint64_t *size)
+static int device_size_fd(int devfd, uint64_t *size)
 {
 	struct stat st;
-	int devfd, r = -EINVAL;
+	int r = -EINVAL;
 
-	devfd = open(device->path, O_RDONLY);
-	if(devfd == -1)
-		return -EINVAL;
+	if(devfd < 0)
+		return r;
 
 	if (fstat(devfd, &st) < 0)
-		goto out;
+		return r;
 
 	if (S_ISREG(st.st_mode)) {
 		*size = (uint64_t)st.st_size;
 		r = 0;
 	} else if (ioctl(devfd, BLKGETSIZE64, size) >= 0)
 		r = 0;
-out:
+
+	return r;
+}
+
+/* Get data size in bytes */
+int device_size(struct device *device, uint64_t *size)
+{
+	int devfd, r;
+
+	devfd = open(device->path, O_RDONLY);
+	if(devfd < 0)
+		return -EINVAL;
+
+	r = device_size_fd(devfd, size);
+
 	close(devfd);
 	return r;
 }

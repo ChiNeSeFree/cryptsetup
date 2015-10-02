@@ -21,6 +21,7 @@
 
 #include "luks2_internal.h"
 #include <uuid/uuid.h>
+#include <assert.h>
 
 struct area {
 	uint64_t offset;
@@ -40,7 +41,83 @@ static size_t get_min_offset(struct luks2_hdr *hdr)
 
 static size_t get_max_offset(struct crypt_device *cd)
 {
-	return crypt_get_data_offset(cd) * SECTOR_SIZE;
+	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
+	size_t r = crypt_get_data_offset(cd) * SECTOR_SIZE;
+	return r ?: LUKS2_hdr_and_areas_size(hdr->jobj);
+}
+
+int LUKS2_find_area_max_gap(struct crypt_device *cd, struct luks2_hdr *hdr,
+			uint64_t *area_offset, uint64_t *area_length)
+{
+	struct area areas[LUKS2_KEYSLOTS_MAX], sorted_areas[LUKS2_KEYSLOTS_MAX+1] = {};
+	int i, j, k, area_i;
+	size_t valid_offset, offset, length;
+
+	/* fill area offset + length table */
+	for (i = 0; i < LUKS2_KEYSLOTS_MAX; i++) {
+		if (!LUKS2_keyslot_area(hdr, i, &areas[i].offset, &areas[i].length))
+			continue;
+		areas[i].length = 0;
+		areas[i].offset = 0;
+	}
+
+	/* sort table */
+	k = 0; /* index in sorted table */
+	for (i = 0; i < LUKS2_KEYSLOTS_MAX; i++) {
+		offset = get_max_offset(cd) ?: UINT64_MAX;
+		area_i = -1;
+		/* search for the smallest offset in table */
+		for (j = 0; j < LUKS2_KEYSLOTS_MAX; j++)
+			if (areas[j].offset && areas[j].offset <= offset) {
+				area_i = j;
+				offset = areas[j].offset;
+			}
+
+		if (area_i >= 0) {
+			sorted_areas[k].length = areas[area_i].length;
+			sorted_areas[k].offset = areas[area_i].offset;
+			areas[area_i].length = 0;
+			areas[area_i].offset = 0;
+			k++;
+		}
+	}
+
+	sorted_areas[LUKS2_KEYSLOTS_MAX].offset = get_max_offset(cd);
+	sorted_areas[LUKS2_KEYSLOTS_MAX].length = 1;
+
+	/* search for the gap we can use */
+	length = valid_offset = 0;
+	offset = get_min_offset(hdr);
+	for (i = 0; i < LUKS2_KEYSLOTS_MAX+1; i++) {
+		/* skip empty */
+		if (sorted_areas[i].offset == 0 || sorted_areas[i].length == 0)
+			continue;
+
+		/* found bigger gap than the last one */
+		if ((offset < sorted_areas[i].offset) && (sorted_areas[i].offset - offset) > length) {
+			length = sorted_areas[i].offset - offset;
+			valid_offset = offset;
+		}
+
+		/* move beyond allocated area */
+		offset = sorted_areas[i].offset + sorted_areas[i].length;
+	}
+
+	/* this search 'algorithm' does not work with unaligned areas */
+	assert(length == size_round_up(length, 4096));
+	assert(valid_offset == size_round_up(valid_offset, 4096));
+
+	if (!length) {
+		log_err(cd, _("No free space in areas.\n"));
+		return -EINVAL;
+	}
+
+	log_dbg("Found largest free area %zu -> %zu", valid_offset, length + valid_offset);
+
+	*area_offset = valid_offset;
+	*area_length = length;
+
+	return 0;
 }
 
 int LUKS2_find_area_gap(struct crypt_device *cd, struct luks2_hdr *hdr,
@@ -173,14 +250,12 @@ int LUKS2_generate_hdr(
 		return -EINVAL;
 	}
 
-	if (LUKS2_digest_segment_assign(cd, hdr, CRYPT_DEFAULT_SEGMENT, digest, 1, 0) < 0) {
+	if (LUKS2_digest_segment_assign(cd, hdr, 0, digest, 1, 0) < 0) {
 		json_object_put(hdr->jobj);
 		hdr->jobj = NULL;
 		return -EINVAL;
 	}
 
-	jobj_segment = json_object_new_object();
-	json_object_object_add(jobj_segment, "type", json_object_new_string("crypt"));
 	if (detached_metadata_device)
 		offset = (uint64_t)alignPayload;
 	else {
@@ -190,11 +265,7 @@ int LUKS2_generate_hdr(
 		offset += alignOffset;
 	}
 
-	json_object_object_add(jobj_segment, "offset", json_object_new_uint64(offset));
-	json_object_object_add(jobj_segment, "iv_tweak", json_object_new_string("0"));
-	json_object_object_add(jobj_segment, "size", json_object_new_string("dynamic"));
-	json_object_object_add(jobj_segment, "encryption", json_object_new_string(cipher));
-	json_object_object_add(jobj_segment, "sector_size", json_object_new_int(sector_size));
+	jobj_segment = LUKS2_segment_create_crypt(offset, 0, NULL, cipher, sector_size, 0);
 
 	if (integrity) {
 		jobj_integrity = json_object_new_object();
@@ -204,7 +275,7 @@ int LUKS2_generate_hdr(
 		json_object_object_add(jobj_segment, "integrity", jobj_integrity);
 	}
 
-	json_object_object_add_by_uint(jobj_segments, CRYPT_DEFAULT_SEGMENT, jobj_segment);
+	json_object_object_add_by_uint(jobj_segments, 0, jobj_segment);
 
 	json_size = hdr->hdr_size - LUKS2_HDR_BIN_LEN;
 	json_object_object_add(jobj_config, "json_size", json_object_new_uint64(json_size));

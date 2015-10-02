@@ -86,7 +86,7 @@ int keyring_check(void)
 #endif
 }
 
-int keyring_add_key_in_thread_keyring(const char *key_desc, const void *key, size_t key_size)
+int keyring_add_logon_key_in_thread_keyring(const char *key_desc, const void *key, size_t key_size)
 {
 #ifdef KERNEL_KEYRING
 	key_serial_t kid;
@@ -94,6 +94,83 @@ int keyring_add_key_in_thread_keyring(const char *key_desc, const void *key, siz
 	kid = add_key("logon", key_desc, key, key_size, KEY_SPEC_THREAD_KEYRING);
 	if (kid < 0)
 		return -errno;
+
+	return 0;
+#else
+	return -ENOTSUP;
+#endif
+}
+
+int keyring_add_user_key_in_thread_keyring(const char *key_desc, const void *key, size_t key_size)
+{
+#ifdef KERNEL_KEYRING
+	key_serial_t kid;
+
+	kid = add_key("user", key_desc, key, key_size, KEY_SPEC_THREAD_KEYRING);
+	if (kid < 0)
+		return -errno;
+
+	return 0;
+#else
+	return -ENOTSUP;
+#endif
+}
+
+/* currently used in client utilities only */
+int keyring_add_key_in_user_keyring(const char *type, const char *key_desc, const void *key, size_t key_size)
+{
+#ifdef KERNEL_KEYRING
+	key_serial_t kid;
+
+	kid = add_key(type, key_desc, key, key_size, KEY_SPEC_USER_KEYRING);
+	if (kid < 0)
+		return -errno;
+
+	return 0;
+#else
+	return -ENOTSUP;
+#endif
+}
+
+int keyring_get_key(const char *key_desc,
+		    char **key,
+		    size_t *key_size)
+{
+#ifdef KERNEL_KEYRING
+	int err;
+	key_serial_t kid;
+	long ret;
+	char *buf = NULL;
+	size_t len = 0;
+
+	do
+		kid = request_key("user", key_desc, NULL, 0);
+	while (kid < 0 && errno == EINTR);
+
+	if (kid < 0)
+		return -errno;
+
+	/* just get payload size */
+	ret = keyctl_read(kid, NULL, 0);
+	if (ret > 0) {
+		len = ret;
+		buf = malloc(len);
+		if (!buf)
+			return -ENOMEM;
+
+		/* retrieve actual payload data */
+		ret = keyctl_read(kid, buf, len);
+	}
+
+	if (ret < 0) {
+		err = errno;
+		crypt_memzero(buf, len);
+		free(buf);
+		return -err;
+	}
+
+	*key = buf;
+	*key_size = len;
 
 	return 0;
 #else
@@ -141,6 +218,36 @@ int keyring_get_passphrase(const char *key_desc,
 
 	*passphrase = buf;
 	*passphrase_len = len;
+
+	return 0;
+#else
+	return -ENOTSUP;
+#endif
+}
+
+int keyring_revoke_and_unlink_key_type(const char *type, const char *key_desc)
+{
+#ifdef KERNEL_KEYRING
+	key_serial_t kid;
+
+	do
+		kid = request_key(type, key_desc, NULL, 0);
+	while (kid < 0 && errno == EINTR);
+
+	if (kid < 0)
+		return 0;
+
+	if (keyctl_revoke(kid))
+		return -errno;
+
+	/*
+	 * best effort only. the key could have been linked
+	 * in some other keyring and its payload is now
+	 * revoked anyway.
+	 */
+	keyctl_unlink(kid, KEY_SPEC_THREAD_KEYRING);
+	keyctl_unlink(kid, KEY_SPEC_PROCESS_KEYRING);
+	keyctl_unlink(kid, KEY_SPEC_USER_KEYRING);
 
 	return 0;
 #else

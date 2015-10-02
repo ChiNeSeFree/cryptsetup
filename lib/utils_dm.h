@@ -33,6 +33,12 @@ struct crypt_params_verity;
 struct device;
 struct crypt_params_integrity;
 
+/* Device mapper general flags */
+#define DM_ACTIVATE_READONLY	(1 << 0)
+#define DM_ACTIVATE_PRIVATE	(1 << 1)
+
+#define DM_SUSPEND_SKIP_LOCKFS	(1 << 2)
+
 /* Device mapper backend - kernel support flags */
 #define DM_KEY_WIPE_SUPPORTED (1 << 0)	/* key wipe message */
 #define DM_LMK_SUPPORTED      (1 << 1)	/* lmk mode */
@@ -73,6 +79,7 @@ int dm_flags(dm_target_type target, uint32_t *flags);
 struct dm_target {
 	dm_target_type type;
 	enum tdirection direction;
+	/* TODO: rename 'offset' to 'start' */
 	uint64_t offset;
 	uint64_t size;
 	struct device *data_device;
@@ -139,7 +146,7 @@ struct crypt_dm_active_device {
 	unsigned holders:1;	/* device holders detected (on query only) */
 
 	uint32_t segment_count;
-	struct dm_target segment[3];
+	struct dm_target segment[4];
 };
 
 void dm_backend_init(void);
@@ -174,13 +181,14 @@ int dm_query_device(struct crypt_device *cd, const char *name,
 		    uint32_t get_flags, struct crypt_dm_active_device *dmd);
 int dm_create_device(struct crypt_device *cd, const char *name,
 		     const char *type, struct crypt_dm_active_device *dmd);
-int dm_suspend_device(struct crypt_device *cd, const char *name);
+int dm_suspend_device(struct crypt_device *cd, const char *name, uint32_t dmflags);
 int dm_suspend_and_wipe_key(struct crypt_device *cd, const char *name);
-int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t flags);
+int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t dmflags);
 int dm_resume_and_reinstate_key(struct crypt_device *cd, const char *name,
 				const struct volume_key *vk);
 int dm_reload_device(struct crypt_device *cd, const char *name,
 		     const char *type, struct crypt_dm_active_device *dmd);
+void dm_debug_table(const struct crypt_dm_active_device *dmd);
 
 const char *dm_get_dir(void);
 

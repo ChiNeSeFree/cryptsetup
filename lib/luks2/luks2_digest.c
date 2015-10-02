@@ -112,7 +112,8 @@ int LUKS2_digest_by_keyslot(struct crypt_device *cd,
 	return -ENOENT;
 }
 
-static int _digest_verify(struct crypt_device *cd,
+int LUKS2_digest_verify_by_digest(struct crypt_device *cd,
+	struct luks2_hdr *hdr,
 	int digest,
 	const struct volume_key *vk)
 {
@@ -124,18 +125,20 @@ static int _digest_verify(struct crypt_device *cd,
 		return -EINVAL;
 
 	r = h->verify(cd, digest, vk->key, vk->keylength);
-	if (r < 0)
+	if (r < 0) {
 		log_dbg("Digest %d (%s) verify failed with %d.", digest, h->name, r);
+		return r;
+	}
 
-	return r;
+	return digest;
 }
 
 int LUKS2_digest_verify(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
-	struct volume_key *vk,
+	const struct volume_key *vk,
 	int keyslot)
 {
-	int digest, r;
+	int digest;
 
 	digest = LUKS2_digest_by_keyslot(cd, hdr, keyslot);
 	if (digest < 0)
@@ -143,9 +146,7 @@ int LUKS2_digest_verify(struct crypt_device *cd,
 
 	log_dbg("Verifying key from keyslot %d, digest %d.", keyslot, digest);
 
-	r = _digest_verify(cd, digest, vk);
-
-	return r < 0 ? r : digest;
+	return LUKS2_digest_verify_by_digest(cd, hdr, digest, vk);
 }
 
 int LUKS2_digest_dump(struct crypt_device *cd, int digest)
@@ -158,37 +159,25 @@ int LUKS2_digest_dump(struct crypt_device *cd, int digest)
 	return h->dump(cd, digest);
 }
 
-int LUKS2_digest_verify_by_segment(struct crypt_device *cd,
-	struct luks2_hdr *hdr,
-	int segment,
-	const struct volume_key *vk)
-{
-	int digest, r;
-
-	digest = LUKS2_digest_by_segment(cd, hdr, segment);
-	if (digest < 0)
-		return digest;
-
-	log_dbg("Verifying key digest %d.", digest);
-
-	r = _digest_verify(cd, digest, vk);
-
-	return r < 0 ? r : digest;
-}
-
 int LUKS2_digest_any_matching(struct crypt_device *cd,
 		struct luks2_hdr *hdr,
 		const struct volume_key *vk)
 {
 	int digest;
 
-	for (digest = 0; digest < LUKS2_DIGEST_MAX; digest++) {
-		if (_digest_verify(cd, digest, vk) < 0)
-			continue;
-		return digest;
-	}
+	for (digest = 0; digest < LUKS2_DIGEST_MAX; digest++)
+		if (LUKS2_digest_verify_by_digest(cd, hdr, digest, vk) == digest)
+			return digest;
 
 	return -ENOENT;
+}
+
+int LUKS2_digest_verify_by_segment(struct crypt_device *cd,
+	struct luks2_hdr *hdr,
+	int segment,
+	const struct volume_key *vk)
+{
+	return LUKS2_digest_verify_by_digest(cd, hdr, LUKS2_digest_by_segment(cd, hdr, segment), vk);
 }
 
 /* FIXME: segment can have more digests */
@@ -198,6 +187,9 @@ int LUKS2_digest_by_segment(struct crypt_device *cd,
 {
 	char segment_name[16];
 	json_object *jobj_digests, *jobj_digest_segments;
+
+	if (segment == CRYPT_DEFAULT_SEGMENT)
+		segment = LUKS2_get_default_segment(hdr);
 
 	json_object_object_get_ex(hdr->jobj, "digests", &jobj_digests);
 
@@ -387,6 +379,11 @@ static char *get_key_description_by_digest(struct crypt_device *cd, int digest)
 	return desc;
 }
 
+char *LUKS2_key_description_by_digest(struct crypt_device *cd, int digest)
+{
+	return get_key_description_by_digest(cd, digest);
+}
+
 int LUKS2_key_description_by_segment(struct crypt_device *cd,
 		struct luks2_hdr *hdr, struct volume_key *vk, int segment)
 {
@@ -399,14 +396,38 @@ int LUKS2_key_description_by_segment(struct crypt_device *cd,
 }
 
 int LUKS2_volume_key_load_in_keyring_by_keyslot(struct crypt_device *cd,
-		struct luks2_hdr *hdr, struct volume_key *vk, int keyslot)
+		struct luks2_hdr *hdr, struct volume_key *vk, int keyslot,
+		unsigned user_type)
 {
 	char *desc = get_key_description_by_digest(cd, LUKS2_digest_by_keyslot(cd, hdr, keyslot));
 	int r;
 
 	r = crypt_volume_key_set_description(vk, desc);
-	if (!r)
-		r = crypt_volume_key_load_in_keyring(cd, vk);
+	if (!r) {
+		if (user_type)
+			r = crypt_volume_key_load_user_in_keyring(cd, vk);
+		else
+			r = crypt_volume_key_load_logon_in_keyring(cd, vk);
+	}
+
+	free(desc);
+	return r;
+}
+
+int LUKS2_volume_key_load_in_keyring_by_digest(struct crypt_device *cd,
+		struct luks2_hdr *hdr, struct volume_key *vk, int digest,
+		unsigned user_type)
+{
+	char *desc = get_key_description_by_digest(cd, digest);
+	int r;
+
+	r = crypt_volume_key_set_description(vk, desc);
+	if (!r) {
+		if (user_type)
+			r = crypt_volume_key_load_user_in_keyring(cd, vk);
+		else
+			r = crypt_volume_key_load_logon_in_keyring(cd, vk);
+	}
 
 	free(desc);
 	return r;

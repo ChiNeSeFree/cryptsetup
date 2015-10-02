@@ -41,6 +41,8 @@
 #include "utils_io.h"
 #include "crypto_backend.h"
 #include "kernel_backend.h"
+#include "utils_reencrypt.h"
+#include "utils_storage_wrappers.h"
 
 #include "libcryptsetup.h"
 
@@ -76,6 +78,7 @@
 struct crypt_device;
 
 struct volume_key {
+	int digest_id;
 	size_t keylength;
 	const char *key_description;
 	char key[];
@@ -85,6 +88,9 @@ struct volume_key *crypt_alloc_volume_key(size_t keylength, const char *key);
 struct volume_key *crypt_generate_volume_key(struct crypt_device *cd, size_t keylength);
 void crypt_free_volume_key(struct volume_key *vk);
 int crypt_volume_key_set_description(struct volume_key *key, const char *key_description);
+void crypt_volume_key_set_digest(struct volume_key *vk, int digest);
+int crypt_volume_key_get_digest(const struct volume_key *vk);
+struct volume_key *crypt_volume_key_by_digest(struct volume_key *vks[4], int digest);
 
 struct crypt_pbkdf_type *crypt_get_pbkdf(struct crypt_device *cd);
 int init_pbkdf_type(struct crypt_device *cd,
@@ -112,6 +118,7 @@ size_t device_block_size(struct device *device);
 int device_read_ahead(struct device *device, uint32_t *read_ahead);
 int device_size(struct device *device, uint64_t *size);
 int device_open(struct device *device, int flags);
+int device_open_excl(struct device *device, int flags);
 void device_disable_direct_io(struct device *device);
 int device_is_identical(struct device *device1, struct device *device2);
 int device_is_rotational(struct device *device);
@@ -158,6 +165,7 @@ unsigned crypt_cpusonline(void);
 uint64_t crypt_getphysmemory_kb(void);
 
 int init_crypto(struct crypt_device *ctx);
+void *aligned_malloc(void **base, int size, int alignment);
 
 void logger(struct crypt_device *cd, int level, const char *file, int line, const char *format, ...) __attribute__ ((format (printf, 5, 6)));
 #define log_dbg(x...) logger(NULL, CRYPT_LOG_DEBUG, __FILE__, __LINE__, x)
@@ -190,6 +198,9 @@ int PLAIN_activate(struct crypt_device *cd,
 void *crypt_get_hdr(struct crypt_device *cd, const char *type);
 const char *crypt_get_cipher_spec(struct crypt_device *cd);
 
+int onlyLUKS2(struct crypt_device *cd);
+int onlyLUKS2mask(struct crypt_device *cd, uint32_t mask);
+
 int crypt_wipe_device(struct crypt_device *cd,
 	struct device *device,
 	crypt_wipe_pattern pattern,
@@ -206,7 +217,8 @@ int crypt_get_integrity_tag_size(struct crypt_device *cd);
 
 int crypt_key_in_keyring(struct crypt_device *cd);
 void crypt_set_key_in_keyring(struct crypt_device *cd, unsigned key_in_keyring);
-int crypt_volume_key_load_in_keyring(struct crypt_device *cd, struct volume_key *vk);
+int crypt_volume_key_load_logon_in_keyring(struct crypt_device *cd, struct volume_key *vk);
+int crypt_volume_key_load_user_in_keyring(struct crypt_device *cd, struct volume_key *vk);
 int crypt_use_keyring_for_vk(const struct crypt_device *cd);
 void crypt_drop_keyring_key(struct crypt_device *cd, const char *key_description);
 

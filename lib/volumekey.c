@@ -48,6 +48,8 @@ struct volume_key *crypt_alloc_volume_key(size_t keylength, const char *key)
 			crypt_memzero(&vk->key, keylength);
 	}
 
+	vk->digest_id = -1;
+
 	return vk;
 }
 
@@ -62,6 +64,29 @@ int crypt_volume_key_set_description(struct volume_key *vk, const char *key_desc
 		return -ENOMEM;
 
 	return 0;
+}
+
+void crypt_volume_key_set_digest(struct volume_key *vk, int digest)
+{
+	if (vk && digest >= 0)
+		vk->digest_id = digest;
+}
+
+int crypt_volume_key_get_digest(const struct volume_key *vk)
+{
+	return vk ? vk->digest_id : -1;
+}
+
+struct volume_key *crypt_volume_key_by_digest(struct volume_key *vks[4], int digest)
+{
+	int i;
+
+	if (vks && digest >= 0)
+		for (i = 0; i < 4; i++)
+			if (vks[i] && vks[i]->digest_id == digest)
+				return vks[i];
+
+	return NULL;
 }
 
 void crypt_free_volume_key(struct volume_key *vk)

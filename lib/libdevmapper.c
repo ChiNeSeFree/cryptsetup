@@ -107,7 +107,7 @@ static void set_dm_error(int level,
 	va_end(va);
 }
 
-static int _dm_simple(int task, const char *name, int udev_wait);
+static int _dm_simple(int task, const char *name, uint32_t dmflags);
 
 static int _dm_satisfies_version(unsigned target_maj, unsigned target_min, unsigned target_patch,
 				 unsigned actual_maj, unsigned actual_min, unsigned actual_patch)
@@ -299,7 +299,7 @@ static int _dm_check_versions_all(const struct crypt_dm_active_device *dmd)
 
 int dm_flags_all(const struct crypt_dm_active_device *dmd, uint32_t *flags)
 {
-	int i, r;
+	int i, r = 0;
 	uint32_t dmt_flags;
 
 	for (i = 0; i < dmd->segment_count; i++) {
@@ -322,7 +322,8 @@ int dm_flags(dm_target_type target, uint32_t *flags)
 
 	if ((target == DM_CRYPT     && _dm_crypt_checked) ||
 	    (target == DM_VERITY    && _dm_verity_checked) ||
-	    (target == DM_INTEGRITY && _dm_integrity_checked))
+	    (target == DM_INTEGRITY && _dm_integrity_checked) ||
+	    (target == DM_LINEAR)) // * nothing to check with linear
 		return 0;
 
 	return -ENODEV;
@@ -904,14 +905,26 @@ out:
 	return r;
 }
 
-static int _dm_simple(int task, const char *name, int udev_wait)
+static int _dm_suspend_skip_lockfs(uint32_t dmflags)
 {
-	int r = 0;
+	return dmflags & DM_SUSPEND_SKIP_LOCKFS;
+}
+
+static int _dm_activate_private(uint32_t dmflags)
+{
+	return dmflags & DM_ACTIVATE_PRIVATE;
+}
+
+static int _dm_simple(int task, const char *name, uint32_t dmflags)
+{
+	int udev_wait, r = 0;
 	struct dm_task *dmt;
 	uint32_t cookie = 0;
 
-	if (!_dm_use_udev())
+	if (task == DM_DEVICE_SUSPEND || !_dm_use_udev())
 		udev_wait = 0;
+	else
+		udev_wait = 1;
 
 	if (!(dmt = dm_task_create(task)))
 		return 0;
@@ -920,6 +933,9 @@ static int _dm_simple(int task, const char *name, int udev_wait)
 		goto out;
 
 	if (udev_wait && !_dm_task_set_cookie(dmt, &cookie, DM_UDEV_DISABLE_LIBRARY_FALLBACK))
+		goto out;
+
+	if (_dm_suspend_skip_lockfs(dmflags) && !dm_task_skip_lockfs(dmt))
 		goto out;
 
 	r = dm_task_run(dmt);
@@ -954,7 +970,7 @@ static int _error_device(const char *name, size_t size)
 	if (!dm_task_run(dmt))
 		goto error;
 
-	if (!_dm_simple(DM_DEVICE_RESUME, name, 1)) {
+	if (!_dm_simple(DM_DEVICE_RESUME, name, 0)) {
 		_dm_simple(DM_DEVICE_CLEAR, name, 0);
 		goto error;
 	}
@@ -1164,7 +1180,7 @@ static int _dm_reload_device(const char *name,
 			     const char *type,
 			     struct crypt_dm_active_device *dmd)
 {
-	int r = -EINVAL;
+	int f, r = -EINVAL;
 	struct dm_task *dmt = NULL;
 	uint32_t dmt_flags = 0, read_ahead = 0;
 
@@ -1175,7 +1191,9 @@ static int _dm_reload_device(const char *name,
 	if (!dm_task_set_name(dmt, name))
 		goto out;
 
-	if (dm_flags_all(dmd, &dmt_flags))
+	/* fails when dm-crypt not loaded yet, wtf is this good for now? */
+	f = dm_flags_all(dmd, &dmt_flags);
+	if (f && f != -ENODEV)
 		goto out;
 
 	if ((dmt_flags & DM_SECURE_SUPPORTED) && !dm_task_secure_data(dmt))
@@ -1232,6 +1250,7 @@ static int _dm_create_device(const char *name, const char *type,
 	/* Only need DM_SECURE_SUPPORTED, no target specific fail matters */
 	dm_flags_all(dmd, &dmt_flags);
 
+	/* FIXME: this should be internal dm flags, see dm_resume_device */
 	if (dmd->flags & CRYPT_ACTIVATE_PRIVATE)
 		udev_flags |= CRYPT_TEMP_UDEV_FLAGS;
 
@@ -1539,7 +1558,7 @@ static int dm_status_dmi(const char *name, struct dm_info *dmi,
 	next = dm_get_next_target(dmt, next, &start, &length,
 	                          &target_type, &params);
 
-	if (!target_type || start != 0 || next)
+	if (!target_type || start != 0)
 		goto out;
 
 	if (target && strcmp(target_type, target))
@@ -1548,7 +1567,8 @@ static int dm_status_dmi(const char *name, struct dm_info *dmi,
 	/* for target == NULL check all supported */
 	if (!target && (strcmp(target_type, DM_CRYPT_TARGET) &&
 			strcmp(target_type, DM_VERITY_TARGET) &&
-			strcmp(target_type, DM_INTEGRITY_TARGET)))
+			strcmp(target_type, DM_INTEGRITY_TARGET) &&
+			strcmp(target_type, DM_LINEAR_TARGET)))
 		goto out;
 	r = 0;
 out:
@@ -2434,14 +2454,14 @@ out:
 	return r;
 }
 
-int dm_suspend_device(struct crypt_device *cd, const char *name)
+int dm_suspend_device(struct crypt_device *cd, const char *name, uint32_t dmflags)
 {
 	int r;
 
 	if (dm_init_context(cd, NULL))
 		return -ENOTSUP;
 
-	if (!_dm_simple(DM_DEVICE_SUSPEND, name, 0))
+	if (!_dm_simple(DM_DEVICE_SUSPEND, name, dmflags))
 		r = -EINVAL;
 	else
 		r = 0;
@@ -2468,7 +2488,7 @@ int dm_suspend_and_wipe_key(struct crypt_device *cd, const char *name)
 	}
 
 	if (!_dm_message(name, "key wipe", dmt_flags)) {
-		_dm_simple(DM_DEVICE_RESUME, name, 1);
+		_dm_simple(DM_DEVICE_RESUME, name, 0);
 		r = -EINVAL;
 		goto out;
 	}
@@ -2478,7 +2498,7 @@ out:
 	return r;
 }
 
-int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t flags)
+int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t dmflags)
 {
 	int r = -EINVAL;
 	struct dm_task *dmt;
@@ -2488,7 +2508,7 @@ int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t flags)
 	if (dm_init_context(cd, NULL))
 		return -ENOTSUP;
 
-	if (flags & CRYPT_ACTIVATE_PRIVATE)
+	if (_dm_activate_private(dmflags))
 		udev_flags |= CRYPT_TEMP_UDEV_FLAGS;
 
 	if (!(dmt = dm_task_create(DM_DEVICE_RESUME)))
@@ -2498,6 +2518,9 @@ int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t flags)
 		goto out;
 
 	if (_dm_use_udev() && !_dm_task_set_cookie(dmt, &cookie, udev_flags))
+		goto out;
+
+	if (_dm_suspend_skip_lockfs(dmflags) && !dm_task_skip_lockfs(dmt))
 		goto out;
 
 	if (dm_task_run(dmt))
@@ -2544,7 +2567,7 @@ int dm_resume_and_reinstate_key(struct crypt_device *cd, const char *name,
 		hex_key(&msg[8], vk->keylength, vk->key);
 
 	if (!_dm_message(name, msg, dmt_flags) ||
-	    !_dm_simple(DM_DEVICE_RESUME, name, 1)) {
+	    !_dm_simple(DM_DEVICE_RESUME, name, 0)) {
 		r = -EINVAL;
 		goto out;
 	}
@@ -2594,6 +2617,7 @@ int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_siz
 	tgt->data_device = data_device;
 
 	tgt->type = DM_CRYPT;
+	tgt->direction = TARGET_SET;
 	tgt->u.crypt.vk = (struct volume_key *)vk;
 	tgt->offset = seg_offset;
 	tgt->size = seg_size;
@@ -2695,4 +2719,58 @@ int dm_linear_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_si
 	tgt->u.linear.offset = data_offset;
 
 	return 0;
+}
+
+static int dm_target_debug(const struct dm_target *tgt, char *out, size_t out_len, uint64_t *size)
+{
+	const char *key_name;
+	ssize_t ret;
+	int r = 0;
+
+	ret = snprintf(out, out_len - 1, "%" SCNu64 " %" SCNu64 " ", tgt->offset, tgt->size);
+	if (ret < 0 || (size_t)ret >= out_len)
+		return -EINVAL;
+	out_len -= ret;
+	out += ret;
+
+	switch (tgt->type) {
+	case DM_CRYPT:
+		key_name = tgt->u.crypt.vk->key_description;
+		ret = snprintf(out, out_len, "crypt %s %s %" SCNu64 " %s %" SCNu64 " ss:%" SCNu32, tgt->u.crypt.cipher, key_name ?: "<binary_key>", tgt->u.crypt.iv_offset, device_path(tgt->data_device), tgt->u.crypt.offset, tgt->u.crypt.sector_size);
+		break;
+	case DM_VERITY:
+		ret = snprintf(out, out_len, "verity %s <skipped> ", device_path(tgt->data_device));
+		break;
+	case DM_INTEGRITY:
+		ret = snprintf(out, out_len, "integrity %s %" SCNu64 " <skipped>", device_path(tgt->data_device), tgt->u.integrity.offset);
+		break;
+	case DM_LINEAR:
+		ret = snprintf(out, out_len, "linear %s %" SCNu64, device_path(tgt->data_device), tgt->u.linear.offset);
+		break;
+	default:
+		ret = snprintf(out, out_len, "unknown %s <skipped>", device_path(tgt->data_device));
+		r = -ENOTSUP;
+	}
+
+	if (ret < 0 || (size_t) ret >= out_len)
+		return -EINVAL;
+	out_len -= ret;
+	out += ret;
+
+	*size += tgt->size;
+
+	return r;
+}
+
+/* FIXME: Drop this function (and static above) after code review */
+void dm_debug_table(const struct crypt_dm_active_device *dmd)
+{
+	int i;
+	char buffer[512];
+	uint64_t size = 0;
+
+	for (i = 0; i < dmd->segment_count; i++)
+		if (!dm_target_debug(dmd->segment + i, buffer, sizeof(buffer), &size))
+			log_dbg("%s", buffer);
+	log_dbg("Whole dm dev size %" PRIu64 " (sectors)", size);
 }

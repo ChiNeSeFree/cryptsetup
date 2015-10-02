@@ -963,6 +963,9 @@ int crypt_keyslot_destroy(struct crypt_device *cd, int keyslot);
 #define CRYPT_ACTIVATE_CHECK_AT_MOST_ONCE (1 << 15)
 /** allow activation check including unbound keyslots (keyslots without segments) */
 #define CRYPT_ACTIVATE_ALLOW_UNBOUND_KEY (1 << 16)
+/** load key(s) in user kernel keyring */
+#define CRYPT_ACTIVATE_LOGON_KEYRING_KEY CRYPT_ACTIVATE_KEYRING_KEY
+#define CRYPT_ACTIVATE_USER_KEYRING_KEY (1 << 17)
 
 /**
  * Active device runtime attributes
@@ -1012,6 +1015,8 @@ uint64_t crypt_get_active_integrity_failures(struct crypt_device *cd,
  */
 /** Unfinished offline reencryption */
 #define CRYPT_REQUIREMENT_OFFLINE_REENCRYPT	(1 << 0)
+/** Online reencryption in-progress */
+#define CRYPT_REQUIREMENT_ONLINE_REENCRYPT	(1 << 1)
 /** unknown requirement in header (output only) */
 #define CRYPT_REQUIREMENT_UNKNOWN		(1 << 31)
 
@@ -1358,6 +1363,7 @@ int crypt_get_volume_key_size(struct crypt_device *cd);
  * @return sector size
  *
  */
+
 int crypt_get_sector_size(struct crypt_device *cd);
 
 /**
@@ -1950,6 +1956,25 @@ int crypt_activate_by_token(struct crypt_device *cd,
 	void *usrptr,
 	uint32_t flags);
 /** @} */
+
+struct crypt_params_reencrypt {
+	const char *protection;
+	const char *hash; /* checksum protection only */
+	size_t hotzone_size; /* noop protection only */
+};
+
+int crypt_reencrypt_init(struct crypt_device *cd,
+	int new_keyslot,
+	const char *reencrypt_mode,
+	const char *cipher,
+	const char *cipher_mode,
+	int64_t data_shift,
+	struct crypt_params_luks2 *params);
+
+int crypt_reencrypt(struct crypt_device *cd,
+		    const char *name,
+		    int (*progress)(uint64_t size, uint64_t offset, void *usrptr),
+		    struct crypt_params_reencrypt *params);
 
 #ifdef __cplusplus
 }
