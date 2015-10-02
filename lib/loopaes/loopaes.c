@@ -203,49 +203,62 @@ int LOOPAES_activate(struct crypt_device *cd,
 		     struct volume_key *vk,
 		     uint32_t flags)
 {
+	const char *p_cipher, *mode;
 	char *cipher = NULL;
 	uint32_t req_flags, dmc_flags;
 	int r;
 	struct crypt_dm_active_device dmd = {
-		.target = DM_CRYPT,
-		.size   = 0,
-		.flags  = flags,
-		.data_device = crypt_data_device(cd),
-		.u.crypt  = {
-			.cipher = NULL,
-			.vk     = vk,
-			.offset = crypt_get_data_offset(cd),
-			.iv_offset = crypt_get_iv_offset(cd),
-			.sector_size = crypt_get_sector_size(cd),
-		}
+		.size = 0,
+		.flags = flags,
+		.segment_count = 1,
 	};
 
-	r = device_block_adjust(cd, dmd.data_device, DEV_EXCL,
-				dmd.u.crypt.offset, &dmd.size, &dmd.flags);
+	r = device_block_adjust(cd, crypt_data_device(cd), DEV_EXCL,
+				crypt_get_data_offset(cd), &dmd.size, &dmd.flags);
 	if (r)
 		return r;
 
 	if (keys_count == 1) {
 		req_flags = DM_PLAIN64_SUPPORTED;
-		r = asprintf(&cipher, "%s-%s", base_cipher, "cbc-plain64");
+		mode = "cbc-plain64";
+		p_cipher = base_cipher;
 	} else {
 		req_flags = DM_LMK_SUPPORTED;
-		r = asprintf(&cipher, "%s:%d-%s", base_cipher, 64, "cbc-lmk");
+		mode = "cbc-lmk";
+		r = asprintf(&cipher, "%s:%d", base_cipher, 64);
+		if (r < 0)
+			return -ENOMEM;
+		p_cipher = cipher;
 	}
-	if (r < 0)
-		return -ENOMEM;
 
-	dmd.u.crypt.cipher = cipher;
+	r = dm_crypt_target_set(&dmd.segment[0], 0, dmd.size,
+			    crypt_data_device(cd),
+			    vk,
+			    p_cipher,
+			    mode,
+			    crypt_get_iv_offset(cd),
+			    crypt_get_data_offset(cd),
+			    crypt_get_integrity(cd),
+			    crypt_get_integrity_tag_size(cd),
+			    crypt_get_sector_size(cd));
+
+	if (r) {
+		free(cipher);
+		return r;
+	}
+
 	log_dbg("Trying to activate loop-AES device %s using cipher %s.",
-		name, dmd.u.crypt.cipher);
+		name, dmd.segment[0].u.crypt.cipher);
 
-	r = dm_create_device(cd, name, CRYPT_LOOPAES, &dmd, 0);
+	r = dm_create_device(cd, name, CRYPT_LOOPAES, &dmd);
 
 	if (r < 0 && !dm_flags(DM_CRYPT, &dmc_flags) &&
 	    (dmc_flags & req_flags) != req_flags) {
 		log_err(cd, _("Kernel doesn't support loop-AES compatible mapping."));
 		r = -ENOTSUP;
 	}
+
+	dm_targets_free(&dmd);
 
 	free(cipher);
 	return r;

@@ -209,7 +209,7 @@ int VERITY_write_sb(struct crypt_device *cd,
 }
 
 /* Calculate hash offset in hash blocks */
-uint64_t VERITY_hash_offset_block(struct crypt_params_verity *params)
+uint64_t VERITY_hash_offset_block(const struct crypt_params_verity *params)
 {
 	uint64_t hash_offset = params->hash_area_offset;
 
@@ -242,10 +242,15 @@ int VERITY_activate(struct crypt_device *cd,
 		     struct crypt_params_verity *verity_hdr,
 		     uint32_t activation_flags)
 {
-	struct crypt_dm_active_device dmd;
 	uint32_t dmv_flags;
 	unsigned int fec_errors = 0;
 	int r;
+	struct crypt_dm_active_device dmd = {
+		.size = verity_hdr->data_size * verity_hdr->data_block_size / 512,
+		.flags = activation_flags,
+		.uuid = crypt_get_uuid(cd),
+		.segment_count = 1,
+	};
 
 	log_dbg("Trying to activate VERITY device %s using hash %s.",
 		name ?: "[none]", verity_hdr->hash_name);
@@ -271,50 +276,53 @@ int VERITY_activate(struct crypt_device *cd,
 	if (!name)
 		return 0;
 
-	dmd.target = DM_VERITY;
-	dmd.data_device = crypt_data_device(cd);
-	dmd.u.verity.hash_device = crypt_metadata_device(cd);
-	dmd.u.verity.fec_device = fec_device;
-	dmd.u.verity.root_hash = root_hash;
-	dmd.u.verity.root_hash_size = root_hash_size;
-	dmd.u.verity.hash_offset = VERITY_hash_offset_block(verity_hdr);
-	dmd.u.verity.fec_offset = verity_hdr->fec_area_offset / verity_hdr->hash_block_size;
-	dmd.u.verity.hash_blocks = VERITY_hash_blocks(cd, verity_hdr);
-	dmd.flags = activation_flags;
-	dmd.size = verity_hdr->data_size * verity_hdr->data_block_size / 512;
-	dmd.uuid = crypt_get_uuid(cd);
-	dmd.u.verity.vp = verity_hdr;
-
-	r = device_block_adjust(cd, dmd.u.verity.hash_device, DEV_OK,
+	r = device_block_adjust(cd, crypt_metadata_device(cd), DEV_OK,
 				0, NULL, NULL);
 	if (r)
 		return r;
 
-	r = device_block_adjust(cd, dmd.data_device, DEV_EXCL,
+	r = device_block_adjust(cd, crypt_data_device(cd), DEV_EXCL,
 				0, &dmd.size, &dmd.flags);
 	if (r)
 		return r;
 
-	if (dmd.u.verity.fec_device) {
-		r = device_block_adjust(cd, dmd.u.verity.fec_device, DEV_OK,
+	if (fec_device) {
+		r = device_block_adjust(cd, fec_device, DEV_OK,
 					0, NULL, NULL);
 		if (r)
 			return r;
 	}
 
-	r = dm_create_device(cd, name, CRYPT_VERITY, &dmd, 0);
+	r = dm_verity_target_set(dmd.segment, 0, dmd.size,
+			    crypt_data_device(cd),
+			    crypt_metadata_device(cd),
+			    fec_device,
+			    root_hash,
+			    root_hash_size,
+			    VERITY_hash_offset_block(verity_hdr),
+			    VERITY_hash_blocks(cd, verity_hdr),
+			    verity_hdr);
+
+	if (r)
+		return r;
+
+	r = dm_create_device(cd, name, CRYPT_VERITY, &dmd);
 	if (r < 0 && (dm_flags(DM_VERITY, &dmv_flags) || !(dmv_flags & DM_VERITY_SUPPORTED))) {
 		log_err(cd, _("Kernel doesn't support dm-verity mapping."));
-		return -ENOTSUP;
+		r = -ENOTSUP;
 	}
 	if (r < 0)
-		return r;
+		goto out;
 
 	r = dm_status_verity_ok(cd, name);
 	if (r < 0)
-		return r;
+		goto out;
 
 	if (!r)
 		log_err(cd, _("Verity device detected corruption after activation."));
-	return 0;
+
+	r = 0;
+out:
+	dm_targets_free(&dmd);
+	return r;
 }

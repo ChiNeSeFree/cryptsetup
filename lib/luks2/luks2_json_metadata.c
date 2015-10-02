@@ -1876,22 +1876,11 @@ int LUKS2_activate(struct crypt_device *cd,
 	enum devcheck device_check;
 	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
 	struct crypt_dm_active_device dmd = {
-		.target = DM_CRYPT,
 		.uuid   = crypt_get_uuid(cd),
-		.size   = 0,
-		.data_device = crypt_data_device(cd),
-		.u.crypt = {
-			.vk     = vk,
-			.offset = crypt_get_data_offset(cd),
-			.cipher = LUKS2_get_cipher(hdr, CRYPT_DEFAULT_SEGMENT),
-			.integrity = crypt_get_integrity(cd),
-			.iv_offset = 0,
-			.tag_size = crypt_get_integrity_tag_size(cd),
-			.sector_size = crypt_get_sector_size(cd)
-		}
+		.segment_count = 1
 	};
 	char dm_int_name[512], dm_int_dev_name[PATH_MAX];
-	struct device *device = NULL;
+	struct device *idevice = NULL;
 
 	/* do not allow activation when particular requirements detected */
 	if ((r = LUKS2_unmet_requirements(cd, hdr, 0, 0)))
@@ -1908,7 +1897,7 @@ int LUKS2_activate(struct crypt_device *cd,
 	else
 		device_check = DEV_EXCL;
 
-	if (dmd.u.crypt.tag_size) {
+	if (crypt_get_integrity_tag_size(cd)) {
 		if (!LUKS2_integrity_compatible(hdr)) {
 			log_err(cd, "Unsupported device integrity configuration.");
 			return -EINVAL;
@@ -1920,39 +1909,47 @@ int LUKS2_activate(struct crypt_device *cd,
 			return r;
 
 		snprintf(dm_int_dev_name, sizeof(dm_int_dev_name), "%s/%s", dm_get_dir(), dm_int_name);
-		r = device_alloc(&device, dm_int_dev_name);
+		r = device_alloc(&idevice, dm_int_dev_name);
 		if (r) {
 			dm_remove_device(cd, dm_int_name, 0);
 			return r;
 		}
-
-		/* Space for IV metadata only */
-		if (!dmd.u.crypt.integrity)
-			dmd.u.crypt.integrity = "none";
-
-		dmd.data_device = device;
-		dmd.u.crypt.offset = 0;
 
 		r = INTEGRITY_data_sectors(cd, crypt_data_device(cd),
 					   crypt_get_data_offset(cd) * SECTOR_SIZE,
 					   &dmd.size);
 		if (r < 0) {
 			log_err(cd, "Cannot detect integrity device size.");
-			device_free(device);
+			device_free(idevice);
 			dm_remove_device(cd, dm_int_name, 0);
 			return r;
 		}
 	}
 
-	r = device_block_adjust(cd, dmd.data_device, device_check,
-				 dmd.u.crypt.offset, &dmd.size, &dmd.flags);
-	if (!r)
-		r = dm_create_device(cd, name, CRYPT_LUKS2, &dmd, 0);
+	r = device_block_adjust(cd, idevice ?: crypt_data_device(cd), device_check,
+				idevice ? 0 : crypt_get_data_offset(cd), &dmd.size,
+				&dmd.flags);
 
-	if (r < 0 && dmd.u.crypt.integrity)
+	if (!r)
+		r = dm_crypt_target_set(dmd.segment, 0, dmd.size,
+					idevice ?: crypt_data_device(cd),
+					vk,
+					crypt_get_cipher(cd),
+					crypt_get_cipher_mode(cd),
+					crypt_get_iv_offset(cd),
+					idevice ? 0 : crypt_get_data_offset(cd),
+					crypt_get_integrity(cd) ?: "none",
+					crypt_get_integrity_tag_size(cd),
+					crypt_get_sector_size(cd));
+
+	if (!r)
+		r = dm_create_device(cd, name, CRYPT_LUKS2, &dmd);
+
+	if (r < 0 && idevice)
 		dm_remove_device(cd, dm_int_name, 0);
 
-	device_free(device);
+	device_free(idevice);
+	dm_targets_free(&dmd);
 	return r;
 }
 

@@ -445,7 +445,7 @@ int VERITY_create(struct crypt_device *cd,
 		verity_hdr->salt_size);
 }
 
-uint64_t VERITY_hash_blocks(struct crypt_device *cd, struct crypt_params_verity *params)
+uint64_t VERITY_hash_blocks(struct crypt_device *cd, const struct crypt_params_verity *params)
 {
 	off_t hash_position = 0;
 	int levels = 0;

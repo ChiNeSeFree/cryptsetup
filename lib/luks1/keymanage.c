@@ -1173,21 +1173,11 @@ int LUKS1_activate(struct crypt_device *cd,
 		   uint32_t flags)
 {
 	int r;
-	char *dm_cipher = NULL;
 	enum devcheck device_check;
 	struct crypt_dm_active_device dmd = {
-		.target = DM_CRYPT,
-		.uuid   = crypt_get_uuid(cd),
-		.flags  = flags,
-		.size   = 0,
-		.data_device = crypt_data_device(cd),
-		.u.crypt = {
-			.cipher = NULL,
-			.vk     = vk,
-			.offset = crypt_get_data_offset(cd),
-			.iv_offset = 0,
-			.sector_size = crypt_get_sector_size(cd),
-		}
+		.flags = flags,
+		.uuid = crypt_get_uuid(cd),
+		.segment_count = 1,
 	};
 
 	if (dmd.flags & CRYPT_ACTIVATE_SHARED)
@@ -1195,19 +1185,26 @@ int LUKS1_activate(struct crypt_device *cd,
 	else
 		device_check = DEV_EXCL;
 
-	r = device_block_adjust(cd, dmd.data_device, device_check,
-				 dmd.u.crypt.offset, &dmd.size, &dmd.flags);
+	r = device_block_adjust(cd, crypt_data_device(cd), device_check,
+				crypt_get_data_offset(cd), &dmd.size, &dmd.flags);
 	if (r)
 		return r;
 
-	r = asprintf(&dm_cipher, "%s-%s", crypt_get_cipher(cd), crypt_get_cipher_mode(cd));
-	if (r < 0)
-		return -ENOMEM;
+	r = dm_crypt_target_set(&dmd.segment[0], 0, dmd.size,
+			    crypt_data_device(cd),
+			    vk,
+			    crypt_get_cipher(cd),
+			    crypt_get_cipher_mode(cd),
+			    crypt_get_iv_offset(cd),
+			    crypt_get_data_offset(cd),
+			    crypt_get_integrity(cd),
+			    crypt_get_integrity_tag_size(cd),
+			    crypt_get_sector_size(cd));
+	if (!r)
+		r = dm_create_device(cd, name, CRYPT_LUKS1, &dmd);
 
-	dmd.u.crypt.cipher = dm_cipher;
-	r = dm_create_device(cd, name, CRYPT_LUKS1, &dmd, 0);
+	dm_targets_free(&dmd);
 
-	free(dm_cipher);
 	return r;
 }
 
