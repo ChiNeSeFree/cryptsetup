@@ -1,16 +1,25 @@
 TARGET=keyslot_test
-CFLAGS=-O0 -g -Wall -D_GNU_SOURCE -I ../../lib/
+LIBNVCRYPT_PATH=/home/user/usr/lib
+LIBNVCRYPT_INCLUDE=/home/user/usr/include
+CFLAGS=-O0 -g -Wall -D_GNU_SOURCE -I ../../lib/ -I$(LIBNVCRYPT_INCLUDE)
 LDLIBS=-ljson-c -luuid -lgcrypt -ldevmapper -lpthread -lssh
+LDLIBS_NVCRYPT=-lm -lnvcrypt -lpopt
 CC=gcc
 
 TARGET2=keyslot_test_remote_pass
+TARGET5=nvcrypt_token
+TARGET6=nvcrypt_token_keyring
 
 SOURCES=keyslot_test.c
 OBJECTS=$(SOURCES:.c=.o)
 SOURCES2=keyslot_test_remote_pass.c
 OBJECTS2=$(SOURCES2:.c=.o)
+SOURCES5=nvcrypt_token.c
+OBJECTS5=$(SOURCES5:.c=.o)
+SOURCES6=nvcrypt_token_keyring.c
+OBJECTS6=$(SOURCES6:.c=.o)
 
-all: $(TARGET) $(TARGET2) $(TARGET4)
+all: $(TARGET) $(TARGET2) $(TARGET5) $(TARGET6)
 
 $(TARGET): $(OBJECTS) ../../.libs/libcryptsetup.a
 	$(CC) -o $@ $^ $(LDLIBS)
@@ -18,7 +27,13 @@ $(TARGET): $(OBJECTS) ../../.libs/libcryptsetup.a
 $(TARGET2): $(OBJECTS2) ../../.libs/libcryptsetup.a
 	$(CC) -o $@ $^ $(LDLIBS)
 
+$(TARGET5): $(OBJECTS5) ../../src/cryptsetup-utils_tools.o ../../src/cryptsetup-utils_password.o ../../.libs/libcryptsetup.a
+	$(CC) -o $@ $^ $(LDLIBS) $(LDLIBS_NVCRYPT) -L$(LIBNVCRYPT_PATH)
+
+$(TARGET6): $(OBJECTS6) ../../src/cryptsetup-utils_tools.o ../../src/cryptsetup-utils_password.o ../../.libs/libcryptsetup.a
+	$(CC) -o $@ $^ $(LDLIBS) $(LDLIBS_NVCRYPT) -L$(LIBNVCRYPT_PATH)
+
 clean:
-	rm -f *.o *~ core $(TARGET) $(TARGET2)
+	rm -f *.o *~ core $(TARGET) $(TARGET2) $(TARGET5) $(TARGET6)
 
 .PHONY: clean
