@@ -2104,7 +2104,7 @@ int crypt_resize(struct crypt_device *cd, const char *name, uint64_t new_size)
 		if (!r) {
 			r = dm_reload_device(cd, name, cd->type, &dmd);
 			if (!r)
-				r = dm_resume_device(cd, name);
+				r = dm_resume_device(cd, name, dmd.flags);
 		}
 	}
 out:

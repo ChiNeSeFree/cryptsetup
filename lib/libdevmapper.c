@@ -2478,17 +2478,37 @@ out:
 	return r;
 }
 
-int dm_resume_device(struct crypt_device *cd, const char *name)
+int dm_resume_device(struct crypt_device *cd, const char *name, uint32_t flags)
 {
-	int r = 0;
+	int r = -EINVAL;
+	struct dm_task *dmt;
+	uint32_t cookie = 0;
+	uint16_t udev_flags = DM_UDEV_DISABLE_LIBRARY_FALLBACK;
 
 	if (dm_init_context(cd, NULL))
 		return -ENOTSUP;
 
-	if (!_dm_simple(DM_DEVICE_RESUME, name, 1))
-		r = -EINVAL;
+	if (flags & CRYPT_ACTIVATE_PRIVATE)
+		udev_flags |= CRYPT_TEMP_UDEV_FLAGS;
 
+	if (!(dmt = dm_task_create(DM_DEVICE_RESUME)))
+		return r;
+
+	if (name && !dm_task_set_name(dmt, name))
+		goto out;
+
+	if (_dm_use_udev() && !_dm_task_set_cookie(dmt, &cookie, udev_flags))
+		goto out;
+
+	if (dm_task_run(dmt))
+		r = 0;
+
+	if (_dm_use_udev())
+		(void)_dm_udev_wait(cookie);
+out:
+	dm_task_destroy(dmt);
 	dm_exit_context();
+
 	return r;
 }
 
