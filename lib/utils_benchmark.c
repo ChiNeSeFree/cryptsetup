@@ -73,7 +73,7 @@ static int cipher_perf_one(struct cipher_perf *cp, char *buf,
 	if (buf_size < block)
 		block = buf_size;
 
-	r = crypt_cipher_init(&cipher, cp->name, cp->mode, cp->key, cp->key_length);
+	r = crypt_kernel_cipher_init(&cipher, cp->name, cp->mode, cp->key, cp->key_length);
 	if (r < 0) {
 		log_dbg("Cannot initialise cipher %s, mode %s.", cp->name, cp->mode);
 		return r;
@@ -84,10 +84,10 @@ static int cipher_perf_one(struct cipher_perf *cp, char *buf,
 			block = buf_size - done;
 
 		if (enc)
-			r = crypt_cipher_encrypt(cipher, &buf[done], &buf[done],
+			r = crypt_kernel_cipher_encrypt(cipher, &buf[done], &buf[done],
 						 block, cp->iv, cp->iv_length);
 		else
-			r = crypt_cipher_decrypt(cipher, &buf[done], &buf[done],
+			r = crypt_kernel_cipher_decrypt(cipher, &buf[done], &buf[done],
 						 block, cp->iv, cp->iv_length);
 		if (r < 0)
 			break;
@@ -95,7 +95,7 @@ static int cipher_perf_one(struct cipher_perf *cp, char *buf,
 		done += block;
 	}
 
-	crypt_cipher_destroy(cipher);
+	crypt_kernel_cipher_destroy(cipher);
 
 	return r;
 }

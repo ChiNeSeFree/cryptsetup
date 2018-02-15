@@ -49,6 +49,11 @@ struct crypt_hmac {
 	int hash_len;
 };
 
+struct crypt_cipher {
+	EVP_CIPHER_CTX *hd_enc;
+	EVP_CIPHER_CTX *hd_dec;
+};
+
 /*
  * Compatible wrappers for OpenSSL < 1.1.0 and LibreSSL < 2.7.0
  */
@@ -334,4 +339,114 @@ int crypt_pbkdf(const char *kdf, const char *hash,
 	}
 
 	return -EINVAL;
+}
+
+int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
+		    const char *mode, const void *key, size_t key_length)
+{
+	struct crypt_cipher *h;
+	const EVP_CIPHER *type = NULL;
+
+	if (strcmp(name, "aes"))
+		return -ENOTSUP;
+
+	if (!strcmp(mode, "xts")) {
+		if (key_length == 32)
+			type = EVP_aes_128_xts();
+		else if (key_length == 64)
+			type = EVP_aes_256_xts();
+	} else if (!strcmp(mode, "cbc")) {
+		if (key_length == 16)
+			type = EVP_aes_128_cbc();
+		else if (key_length == 24)
+			type = EVP_aes_192_cbc();
+		else if (key_length == 32)
+			type = EVP_aes_256_cbc();
+	} else if (!strcmp(mode, "ecb")) {
+		if (key_length == 16)
+			type = EVP_aes_128_ecb();
+		else if (key_length == 24)
+			type = EVP_aes_192_ecb();
+		else if (key_length == 32)
+			type = EVP_aes_256_ecb();
+	} else
+		return -ENOTSUP;
+
+	if (!type)
+		return -EINVAL;
+
+	h = malloc(sizeof(*h));
+	if (!h)
+		return -ENOMEM;
+
+	memset(h, 0, sizeof(*h));
+
+	h->hd_enc = EVP_CIPHER_CTX_new();
+	h->hd_dec = EVP_CIPHER_CTX_new();
+
+	if (!h->hd_enc || !h->hd_dec) {
+		crypt_cipher_destroy(h);
+		return -EINVAL;
+	}
+
+	if (EVP_EncryptInit_ex(h->hd_enc, type, NULL, key, NULL) != 1 ||
+	    EVP_DecryptInit_ex(h->hd_dec, type, NULL, key, NULL) != 1) {
+		crypt_cipher_destroy(h);
+		return -EINVAL;
+	}
+
+	if (EVP_CIPHER_CTX_set_padding(h->hd_enc, 0) != 1 ||
+	    EVP_CIPHER_CTX_set_padding(h->hd_dec, 0) != 1) {
+		crypt_cipher_destroy(h);
+		return -EINVAL;
+	}
+
+	*ctx = h;
+	return 0;
+}
+
+void crypt_cipher_destroy(struct crypt_cipher *ctx)
+{
+	if (!ctx)
+		return;
+
+	EVP_CIPHER_CTX_free(ctx->hd_enc);
+	EVP_CIPHER_CTX_free(ctx->hd_dec);
+	free(ctx);
+}
+
+int crypt_cipher_encrypt(struct crypt_cipher *ctx,
+			 const char *in, char *out, size_t length,
+			 const char *iv, size_t iv_length)
+{
+	int len;
+
+	if (EVP_EncryptInit_ex(ctx->hd_enc, NULL, NULL, NULL, (const unsigned char*)iv) != 1)
+		return -EINVAL;
+
+	if (EVP_EncryptUpdate(ctx->hd_enc, (unsigned char*)out, &len, (unsigned char*)in, length) != 1)
+		return -EINVAL;
+
+	if (EVP_EncryptFinal(ctx->hd_enc, (unsigned char*)out + len, &len) != 1)
+		return -EINVAL;
+
+	return 0;
+}
+
+int crypt_cipher_decrypt(struct crypt_cipher *ctx,
+			 const char *in, char *out, size_t length,
+			 const char *iv, size_t iv_length)
+{
+	int len;
+
+	if (EVP_DecryptInit_ex(ctx->hd_dec, NULL, NULL, NULL, (const unsigned char*)iv) != 1)
+		return -EINVAL;
+
+	if (EVP_DecryptUpdate(ctx->hd_dec, (unsigned char*)out, &len, (unsigned char*)in, length) != 1)
+		return -EINVAL;
+
+	if (EVP_DecryptFinal(ctx->hd_dec, (unsigned char*)out + len, &len) != 1)
+		return -EINVAL;
+
+	return 0;
 }

@@ -20,7 +20,6 @@
  */
 
 #include <string.h>
-#include <stdio.h>
 #include <errno.h>
 #include <assert.h>
 #include <gcrypt.h>
@@ -41,6 +40,22 @@ struct crypt_hmac {
 	gcry_md_hd_t hd;
 	int hash_id;
 	int hash_len;
+};
+
+struct crypt_cipher {
+	gcry_cipher_hd_t hd;
+};
+
+struct cipher_mode {
+	const char *name;
+	int mode_id;
+};
+
+const struct cipher_mode cipher_modes[] = {
+	{ "cbc", GCRY_CIPHER_MODE_CBC },
+	{ "xts", GCRY_CIPHER_MODE_XTS },
+	{ "ecb", GCRY_CIPHER_MODE_ECB },
+	{ NULL, -1 }
 };
 
 /*
@@ -365,4 +380,84 @@ int crypt_pbkdf(const char *kdf, const char *hash,
 		return argon2(kdf, password, password_length, salt, salt_length,
 			      key, key_length, iterations, memory, parallel);
 	return -EINVAL;
+}
+
+int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
+		      const char *mode, const void *buffer, size_t length)
+{
+	struct crypt_cipher *h;
+	int cipher_id;
+	unsigned i;
+
+	assert(crypto_backend_initialised);
+
+	h = malloc(sizeof(*h));
+	if (!h)
+		return -ENOMEM;
+
+	cipher_id = gcry_cipher_map_name(name);
+	if (!cipher_id) {
+		free(h);
+		return -ENOENT;
+	}
+
+	for (i = 0; cipher_modes[i].name; i++) {
+		if (!strcmp(cipher_modes[i].name, mode))
+			break;
+	}
+
+	if (!cipher_modes[i].name) {
+		free(h);
+		return -ENOENT;
+	}
+
+	/* TODO: flags */
+	if (gcry_cipher_open(&h->hd, cipher_id, cipher_modes[i].mode_id, 0)) {
+		free(h);
+		return -EINVAL;
+	}
+
+	/* FIXME: what about null cipher */
+
+	if (gcry_cipher_setkey(h->hd, buffer, length)) {
+		free(h);
+		return -EINVAL;
+	}
+
+	*ctx = h;
+	return 0;
+}
+
+void crypt_cipher_destroy(struct crypt_cipher *ctx)
+{
+	if (ctx) {
+		(void) gcry_cipher_close(ctx->hd);
+		free(ctx);
+	}
+}
+
+int crypt_cipher_encrypt(struct crypt_cipher *ctx,
+			 const char *in, char *out, size_t length,
+			 const char *iv, size_t iv_length)
+{
+	assert(crypto_backend_initialised);
+
+	if (iv && gcry_cipher_setiv(ctx->hd, iv, iv_length))
+		return -EINVAL;
+	if (gcry_cipher_encrypt(ctx->hd, (void *)in, length, out, length))
+		return -EINVAL;
+	return 0;
+}
+
+int crypt_cipher_decrypt(struct crypt_cipher *ctx,
+			 const char *in, char *out, size_t length,
+			 const char *iv, size_t iv_length)
+{
+	assert(crypto_backend_initialised);
+
+	if (iv && gcry_cipher_setiv(ctx->hd, iv, iv_length))
+		return -EINVAL;
+	if (gcry_cipher_decrypt(ctx->hd, (void *)in, length, out, length))
+		return -EINVAL;
+	return 0;
 }

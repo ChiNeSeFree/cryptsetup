@@ -28,6 +28,7 @@
 #include <sys/utsname.h>
 #include <linux/if_alg.h>
 #include "crypto_backend.h"
+#include "kernel_backend.h"
 
 /* FIXME: remove later */
 #ifndef AF_ALG
@@ -332,4 +333,29 @@ int crypt_pbkdf(const char *kdf, const char *hash,
 	}
 
 	return -EINVAL;
+}
+
+int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
+		      const char *mode, const void *buffer, size_t length)
+{
+	return crypt_kernel_cipher_init(ctx, name, mode, buffer, length);
+}
+
+void crypt_cipher_destroy(struct crypt_cipher *ctx)
+{
+	crypt_kernel_cipher_destroy(ctx);
+}
+
+int crypt_cipher_encrypt(struct crypt_cipher *ctx,
+			 const char *in, char *out, size_t length,
+			 const char *iv, size_t iv_length)
+{
+	return crypt_kernel_cipher_encrypt(ctx, in, out, length, iv, iv_length);
+}
+
+int crypt_cipher_decrypt(struct crypt_cipher *ctx,
+			 const char *in, char *out, size_t length,
+			 const char *iv, size_t iv_length)
+{
+	return crypt_kernel_cipher_decrypt(ctx, in, out, length, iv, iv_length);
 }

@@ -103,6 +103,8 @@ int crypt_cipher_blocksize(const char *name);
 int crypt_cipher_wrapped_key(const char *name);
 int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
 		    const char *mode, const void *key, size_t key_length);
+int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
+		    const char *mode, const void *key, size_t key_length);
 void crypt_cipher_destroy(struct crypt_cipher *ctx);
 int crypt_cipher_encrypt(struct crypt_cipher *ctx,
 			 const char *in, char *out, size_t length,
@@ -111,10 +113,14 @@ int crypt_cipher_decrypt(struct crypt_cipher *ctx,
 			 const char *in, char *out, size_t length,
 			 const char *iv, size_t iv_length);
 
+#define CRYPT_DISABLE_KCAPI_FALLBACK 		(1 << 0)
+#define CRYPT_DISABLE_USPACE_BLOCK_CIPHERS	(1 << 1)
+
 /* storage encryption wrappers */
 int crypt_storage_init(struct crypt_storage **ctx, uint64_t sector_start,
 		       const char *cipher, const char *cipher_mode,
-		       const void *key, size_t key_length);
+		       const void *key, size_t key_length,
+		       uint32_t flags);
 void crypt_storage_destroy(struct crypt_storage *ctx);
 int crypt_storage_decrypt(struct crypt_storage *ctx, uint64_t sector,
 			  size_t count, char *buffer);

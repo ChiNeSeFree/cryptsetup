@@ -280,7 +280,7 @@ static int decrypt_blowfish_le_cbc(struct tcrypt_alg *alg,
 
 	assert(bs == 2*sizeof(uint32_t));
 
-	r = crypt_cipher_init(&cipher, "blowfish", "ecb",
+	r = crypt_kernel_cipher_init(&cipher, "blowfish", "ecb",
 			      &key[alg->key_offset], alg->key_size);
 	if (r < 0)
 		return r;
@@ -289,7 +289,7 @@ static int decrypt_blowfish_le_cbc(struct tcrypt_alg *alg,
 	for (i = 0; i < TCRYPT_HDR_LEN; i += bs) {
 		memcpy(iv_old, &buf[i], bs);
 		TCRYPT_swab_le(&buf[i]);
-		r = crypt_cipher_decrypt(cipher, &buf[i], &buf[i],
+		r = crypt_kernel_cipher_decrypt(cipher, &buf[i], &buf[i],
 					  bs, NULL, 0);
 		TCRYPT_swab_le(&buf[i]);
 		if (r < 0)
@@ -299,7 +299,7 @@ static int decrypt_blowfish_le_cbc(struct tcrypt_alg *alg,
 		memcpy(iv, iv_old, bs);
 	}
 
-	crypt_cipher_destroy(cipher);
+	crypt_kernel_cipher_destroy(cipher);
 	crypt_memzero(iv, bs);
 	crypt_memzero(iv_old, bs);
 	return r;
@@ -360,12 +360,12 @@ static int TCRYPT_decrypt_hdr_one(struct tcrypt_alg *alg, const char *mode,
 	}
 
 	TCRYPT_copy_key(alg, mode, backend_key, key);
-	r = crypt_cipher_init(&cipher, alg->name, mode_name,
+	r = crypt_kernel_cipher_init(&cipher, alg->name, mode_name,
 			      backend_key, alg->key_size);
 	if (!r) {
-		r = crypt_cipher_decrypt(cipher, buf, buf, TCRYPT_HDR_LEN,
+		r = crypt_kernel_cipher_decrypt(cipher, buf, buf, TCRYPT_HDR_LEN,
 					 iv, alg->iv_size);
-		crypt_cipher_destroy(cipher);
+		crypt_kernel_cipher_destroy(cipher);
 	}
 
 	crypt_memzero(backend_key, sizeof(backend_key));
@@ -394,7 +394,7 @@ static int TCRYPT_decrypt_cbci(struct tcrypt_algs *ciphers,
 	for (j = 0; j < ciphers->chain_count; j++)
 		cipher[j] = NULL;
 	for (j = 0; j < ciphers->chain_count; j++) {
-		r = crypt_cipher_init(&cipher[j], ciphers->cipher[j].name, "ecb",
+		r = crypt_kernel_cipher_init(&cipher[j], ciphers->cipher[j].name, "ecb",
 				      &key[ciphers->cipher[j].key_offset],
 				      ciphers->cipher[j].key_size);
 		if (r < 0)
@@ -405,7 +405,7 @@ static int TCRYPT_decrypt_cbci(struct tcrypt_algs *ciphers,
 	for (i = 0; i < TCRYPT_HDR_LEN; i += bs) {
 		memcpy(iv_old, &buf[i], bs);
 		for (j = ciphers->chain_count; j > 0; j--) {
-			r = crypt_cipher_decrypt(cipher[j - 1], &buf[i], &buf[i],
+			r = crypt_kernel_cipher_decrypt(cipher[j - 1], &buf[i], &buf[i],
 						  bs, NULL, 0);
 			if (r < 0)
 				goto out;
@@ -417,7 +417,7 @@ static int TCRYPT_decrypt_cbci(struct tcrypt_algs *ciphers,
 out:
 	for (j = 0; j < ciphers->chain_count; j++)
 		if (cipher[j])
-			crypt_cipher_destroy(cipher[j]);
+			crypt_kernel_cipher_destroy(cipher[j]);
 
 	crypt_memzero(iv, bs);
 	crypt_memzero(iv_old, bs);

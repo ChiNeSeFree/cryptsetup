@@ -52,7 +52,7 @@ static int luks2_encrypt_to_storage(char *src, size_t srcLength,
 		return -EINVAL;
 
 	/* Encrypt buffer */
-	r = crypt_storage_init(&s, 0, cipher, cipher_mode, vk->key, vk->keylength);
+	r = crypt_storage_init(&s, SECTOR_SIZE, cipher, cipher_mode, vk->key, vk->keylength, 0);
 	if (r) {
 		log_dbg("Userspace crypto wrapper cannot use %s-%s (%d).",
 			cipher, cipher_mode, r);
@@ -116,7 +116,7 @@ static int luks2_decrypt_from_storage(char *dst, size_t dstLength,
 	if (MISALIGNED_512(dstLength))
 		return -EINVAL;
 
-	r = crypt_storage_init(&s, 0, cipher, cipher_mode, vk->key, vk->keylength);
+	r = crypt_storage_init(&s, SECTOR_SIZE, cipher, cipher_mode, vk->key, vk->keylength, 0);
 	if (r) {
 		log_dbg("Userspace crypto wrapper cannot use %s-%s (%d).",
 			cipher, cipher_mode, r);

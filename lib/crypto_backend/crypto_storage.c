@@ -21,8 +21,10 @@
 
 #include <stdlib.h>
 #include <errno.h>
+#include <stdio.h>
 #include "bitops.h"
 #include "crypto_backend.h"
+#include "kernel_backend.h"
 
 #define SECTOR_SHIFT	9
 #define SECTOR_SIZE	(1 << SECTOR_SHIFT)
@@ -36,13 +38,41 @@ struct crypt_sector_iv {
 	int iv_size;
 	char *iv;
 	struct crypt_cipher *essiv_cipher;
+	const struct crypt_cipher_functions *fns;
 	int benbi_shift;
+};
+
+struct crypt_cipher_functions {
+	int (*init)(struct crypt_cipher **ctx,
+		    const char *cipher,
+		    const char *mode_name,
+		    const void *key, size_t length);
+	void (*destroy)(struct crypt_cipher *ctx);
+	int (*encrypt)(struct crypt_cipher *ctx,
+		       const char *in, char *out, size_t length,
+		       const char *iv, size_t iv_length);
+	int (*decrypt)(struct crypt_cipher *ctx,
+		       const char *in, char *out, size_t length,
+		       const char *iv, size_t iv_length);
+};
+
+static const struct crypt_cipher_functions backend_functions = {
+	.init = crypt_cipher_init,
+	.destroy = crypt_cipher_destroy,
+	.encrypt = crypt_cipher_encrypt,
+	.decrypt = crypt_cipher_decrypt
+}, kernel_functions = {
+	.init = crypt_kernel_cipher_init,
+	.destroy = crypt_kernel_cipher_destroy,
+	.encrypt = crypt_kernel_cipher_encrypt,
+	.decrypt = crypt_kernel_cipher_decrypt
 };
 
 /* Block encryption storage context */
 struct crypt_storage {
 	uint64_t sector_start;
 	struct crypt_cipher *cipher;
+	const struct crypt_cipher_functions *fns;
 	struct crypt_sector_iv cipher_iv;
 };
 
@@ -56,7 +86,8 @@ static int int_log2(unsigned int x)
 
 static int crypt_sector_iv_init(struct crypt_sector_iv *ctx,
 			 const char *cipher_name, const char *mode_name,
-			 const char *iv_name, const void *key, size_t key_length)
+			 const char *iv_name, const void *key, size_t key_length,
+			 const struct crypt_cipher_functions *fns)
 {
 	memset(ctx, 0, sizeof(*ctx));
 
@@ -88,7 +119,7 @@ static int crypt_sector_iv_init(struct crypt_sector_iv *ctx,
 		char tmp[256];
 		int r;
 
-		if (!hash_name)
+		if (!hash_name || !fns)
 			return -EINVAL;
 
 		hash_size = crypt_hash_size(++hash_name);
@@ -114,13 +145,14 @@ static int crypt_sector_iv_init(struct crypt_sector_iv *ctx,
 			return r;
 		}
 
-		r = crypt_cipher_init(&ctx->essiv_cipher, cipher_name, "ecb",
+		r = fns->init(&ctx->essiv_cipher, cipher_name, "ecb",
 				      tmp, hash_size);
 		crypt_backend_memzero(tmp, sizeof(tmp));
 		if (r)
 			return r;
 
 		ctx->type = IV_ESSIV;
+		ctx->fns = fns;
 	} else if (!strncasecmp(iv_name, "benbi", 5)) {
 		int log = int_log2(ctx->iv_size);
 		if (log > SECTOR_SHIFT)
@@ -132,8 +164,11 @@ static int crypt_sector_iv_init(struct crypt_sector_iv *ctx,
 		return -ENOENT;
 
 	ctx->iv = malloc(ctx->iv_size);
-	if (!ctx->iv)
+	if (!ctx->iv) {
+		if (ctx->fns)
+			ctx->fns->destroy(ctx->essiv_cipher);
 		return -ENOMEM;
+	}
 
 	return 0;
 }
@@ -163,7 +198,7 @@ static int crypt_sector_iv_generate(struct crypt_sector_iv *ctx, uint64_t sector
 	case IV_ESSIV:
 		memset(ctx->iv, 0, ctx->iv_size);
 		*(uint64_t *)ctx->iv = cpu_to_le64(sector);
-		return crypt_cipher_encrypt(ctx->essiv_cipher,
+		return ctx->fns->encrypt(ctx->essiv_cipher,
 			ctx->iv, ctx->iv, ctx->iv_size, NULL, 0);
 		break;
 	case IV_BENBI:
@@ -181,7 +216,7 @@ static int crypt_sector_iv_generate(struct crypt_sector_iv *ctx, uint64_t sector
 static void crypt_sector_iv_destroy(struct crypt_sector_iv *ctx)
 {
 	if (ctx->type == IV_ESSIV)
-		crypt_cipher_destroy(ctx->essiv_cipher);
+		ctx->fns->destroy(ctx->essiv_cipher);
 
 	if (ctx->iv) {
 		memset(ctx->iv, 0, ctx->iv_size);
@@ -191,18 +226,42 @@ static void crypt_sector_iv_destroy(struct crypt_sector_iv *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
+static int initialize_storage_cipher(struct crypt_storage *ctx,
+				     const struct crypt_cipher_functions *fns,
+				     const char *cipher,
+				     const char *mode_name,
+				     const char *iv_name,
+				     const char *key,
+				     size_t key_length)
+{
+	int r;
+
+	r = fns->init(&ctx->cipher, cipher, mode_name, key, key_length);
+	if (r)
+		return r;
+
+	r = crypt_sector_iv_init(&ctx->cipher_iv, cipher, mode_name, iv_name, key, key_length, fns);
+	if (r)
+		fns->destroy(ctx->cipher);
+	else
+		ctx->fns = fns;
+
+	return r;
+}
+
 /* Block encryption storage wrappers */
 
 int crypt_storage_init(struct crypt_storage **ctx,
 		       uint64_t sector_start,
 		       const char *cipher,
 		       const char *cipher_mode,
-		       const void *key, size_t key_length)
+		       const void *key, size_t key_length,
+		       uint32_t flags)
 {
 	struct crypt_storage *s;
 	char mode_name[64];
 	char *cipher_iv = NULL;
-	int r = -EIO;
+	int r;
 
 	s = malloc(sizeof(*s));
 	if (!s)
@@ -218,15 +277,15 @@ int crypt_storage_init(struct crypt_storage **ctx,
 		cipher_iv++;
 	}
 
-	r = crypt_cipher_init(&s->cipher, cipher, mode_name, key, key_length);
-	if (r) {
-		crypt_storage_destroy(s);
-		return r;
-	}
+	r = -ENOENT;
+	if (!(flags & CRYPT_DISABLE_USPACE_BLOCK_CIPHERS))
+		r = initialize_storage_cipher(s, &backend_functions, cipher, mode_name, cipher_iv, key, key_length);
 
-	r = crypt_sector_iv_init(&s->cipher_iv, cipher, mode_name, cipher_iv, key, key_length);
+	if ((r == -ENOENT || r == -ENOTSUP) && !(flags & CRYPT_DISABLE_KCAPI_FALLBACK))
+		r = initialize_storage_cipher(s, &kernel_functions, cipher, mode_name, cipher_iv, key, key_length);
+
 	if (r) {
-		crypt_storage_destroy(s);
+		free(s);
 		return r;
 	}
 
@@ -292,7 +351,7 @@ void crypt_storage_destroy(struct crypt_storage *ctx)
 	crypt_sector_iv_destroy(&ctx->cipher_iv);
 
 	if (ctx->cipher)
-		crypt_cipher_destroy(ctx->cipher);
+		ctx->fns->destroy(ctx->cipher);
 
 	memset(ctx, 0, sizeof(*ctx));
 	free(ctx);

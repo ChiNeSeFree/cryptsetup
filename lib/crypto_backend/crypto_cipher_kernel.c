@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include "crypto_backend.h"
+#include "kernel_backend.h"
 
 #ifdef ENABLE_AF_ALG
 
@@ -51,7 +52,7 @@ struct crypt_cipher {
  * ENOTSUP - AF_ALG family not available
  * (but cannot check specifically for skcipher API)
  */
-int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
+int crypt_kernel_cipher_init(struct crypt_cipher **ctx, const char *name,
 		    const char *mode, const void *key, size_t key_length)
 {
 	struct crypt_cipher *h;
@@ -70,12 +71,12 @@ int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
 	h->opfd = -1;
 	h->tfmfd = socket(AF_ALG, SOCK_SEQPACKET, 0);
 	if (h->tfmfd < 0) {
-		crypt_cipher_destroy(h);
+		crypt_kernel_cipher_destroy(h);
 		return -ENOTSUP;
 	}
 
 	if (bind(h->tfmfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-		crypt_cipher_destroy(h);
+		crypt_kernel_cipher_destroy(h);
 		return -ENOENT;
 	}
 
@@ -83,13 +84,13 @@ int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
 		key_length = 0;
 
 	if (setsockopt(h->tfmfd, SOL_ALG, ALG_SET_KEY, key, key_length) < 0) {
-		crypt_cipher_destroy(h);
+		crypt_kernel_cipher_destroy(h);
 		return -EINVAL;
 	}
 
 	h->opfd = accept(h->tfmfd, NULL, 0);
 	if (h->opfd < 0) {
-		crypt_cipher_destroy(h);
+		crypt_kernel_cipher_destroy(h);
 		return -EINVAL;
 	}
 
@@ -165,7 +166,7 @@ bad:
 	return r;
 }
 
-int crypt_cipher_encrypt(struct crypt_cipher *ctx,
+int crypt_kernel_cipher_encrypt(struct crypt_cipher *ctx,
 			 const char *in, char *out, size_t length,
 			 const char *iv, size_t iv_length)
 {
@@ -173,7 +174,7 @@ int crypt_cipher_encrypt(struct crypt_cipher *ctx,
 				  iv, iv_length, ALG_OP_ENCRYPT);
 }
 
-int crypt_cipher_decrypt(struct crypt_cipher *ctx,
+int crypt_kernel_cipher_decrypt(struct crypt_cipher *ctx,
 			 const char *in, char *out, size_t length,
 			 const char *iv, size_t iv_length)
 {
@@ -181,7 +182,7 @@ int crypt_cipher_decrypt(struct crypt_cipher *ctx,
 				  iv, iv_length, ALG_OP_DECRYPT);
 }
 
-void crypt_cipher_destroy(struct crypt_cipher *ctx)
+void crypt_kernel_cipher_destroy(struct crypt_cipher *ctx)
 {
 	if (ctx->tfmfd >= 0)
 		close(ctx->tfmfd);
@@ -192,24 +193,24 @@ void crypt_cipher_destroy(struct crypt_cipher *ctx)
 }
 
 #else /* ENABLE_AF_ALG */
-int crypt_cipher_init(struct crypt_cipher **ctx, const char *name,
+
+int crypt_kernel_cipher_init(struct crypt_cipher **ctx, const char *name,
 		    const char *mode, const void *buffer, size_t length)
 {
 	return -ENOTSUP;
 }
 
-void crypt_cipher_destroy(struct crypt_cipher *ctx)
+void crypt_kernel_cipher_destroy(struct crypt_cipher *ctx)
 {
-	return;
 }
 
-int crypt_cipher_encrypt(struct crypt_cipher *ctx,
+int crypt_kernel_cipher_encrypt(struct crypt_cipher *ctx,
 			 const char *in, char *out, size_t length,
 			 const char *iv, size_t iv_length)
 {
 	return -EINVAL;
 }
-int crypt_cipher_decrypt(struct crypt_cipher *ctx,
+int crypt_kernel_cipher_decrypt(struct crypt_cipher *ctx,
 			 const char *in, char *out, size_t length,
 			 const char *iv, size_t iv_length)
 {
