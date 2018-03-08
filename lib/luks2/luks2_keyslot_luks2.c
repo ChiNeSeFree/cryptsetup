@@ -59,7 +59,7 @@ static int luks2_encrypt_to_storage(char *src, size_t srcLength,
 		return r;
 	}
 
-	r = crypt_storage_encrypt(s, 0, srcLength / SECTOR_SIZE, src);
+	r = crypt_storage_encrypt(s, 0, srcLength, src);
 	crypt_storage_destroy(s);
 	if (r)
 		return r;
@@ -147,7 +147,7 @@ static int luks2_decrypt_from_storage(char *dst, size_t dstLength,
 
 	/* Decrypt buffer */
 	if (!r)
-		r = crypt_storage_decrypt(s, 0, dstLength / SECTOR_SIZE, dst);
+		r = crypt_storage_decrypt(s, 0, dstLength, dst);
 	else
 		log_err(cd, _("IO error while decrypting keyslot."));
 
