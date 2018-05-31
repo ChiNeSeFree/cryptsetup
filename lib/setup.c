@@ -3374,11 +3374,11 @@ uint64_t crypt_get_active_integrity_failures(struct crypt_device *cd, const char
 		return 0;
 
 	/* FIXME: LUKS2 / dm-crypt does not provide this count. */
-	if (dm_query_device(cd, name, 0, &dmd) < 0)
+	if (dm_query_device(cd, name, 0, &dmd) < 0 || dmd.segment_count != 1)
 		return 0;
 
-	if (dmd.target == DM_INTEGRITY &&
-	    !dm_status_integrity_failures(cd, name, &failures))
+	if (dmd.segment[0].type == DM_INTEGRITY &&
+	    !dm_status_integrity_failures(cd, name, &dmd, &failures))
 		return failures;
 
 	return 0;

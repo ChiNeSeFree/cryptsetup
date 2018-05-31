@@ -1633,13 +1633,13 @@ int dm_status_verity_ok(struct crypt_device *cd, const char *name)
 	return r;
 }
 
-int dm_status_integrity_failures(struct crypt_device *cd, const char *name, uint64_t *count)
+int dm_status_integrity_failures(struct crypt_device *cd, const char *name, struct crypt_dm_active_device *dmd, uint64_t *count)
 {
 	int r;
 	struct dm_info dmi;
 	char *status_line = NULL;
 
-	if (dm_init_context(cd, DM_INTEGRITY))
+	if (dm_init_context(cd, dmd))
 		return -ENOTSUP;
 
 	r = dm_status_dmi(name, &dmi, DM_INTEGRITY_TARGET, &status_line);
