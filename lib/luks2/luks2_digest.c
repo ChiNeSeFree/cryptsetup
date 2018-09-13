@@ -112,12 +112,29 @@ int LUKS2_digest_by_keyslot(struct crypt_device *cd,
 	return -ENOENT;
 }
 
+static int _digest_verify(struct crypt_device *cd,
+	int digest,
+	const struct volume_key *vk)
+{
+	const digest_handler *h;
+	int r;
+
+	h = LUKS2_digest_handler(cd, digest);
+	if (!h)
+		return -EINVAL;
+
+	r = h->verify(cd, digest, vk->key, vk->keylength);
+	if (r < 0)
+		log_dbg("Digest %d (%s) verify failed with %d.", digest, h->name, r);
+
+	return r;
+}
+
 int LUKS2_digest_verify(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
 	struct volume_key *vk,
 	int keyslot)
 {
-	const digest_handler *h;
 	int digest, r;
 
 	digest = LUKS2_digest_by_keyslot(cd, hdr, keyslot);
@@ -125,17 +142,10 @@ int LUKS2_digest_verify(struct crypt_device *cd,
 		return digest;
 
 	log_dbg("Verifying key from keyslot %d, digest %d.", keyslot, digest);
-	h = LUKS2_digest_handler(cd, digest);
-	if (!h)
-		return -EINVAL;
 
-	r = h->verify(cd, digest, vk->key, vk->keylength);
-	if (r < 0) {
-		log_dbg("Digest %d (%s) verify failed with %d.", digest, h->name, r);
-		return r;
-	}
+	r = _digest_verify(cd, digest, vk);
 
-	return digest;
+	return r < 0 ? r : digest;
 }
 
 int LUKS2_digest_dump(struct crypt_device *cd, int digest)
@@ -153,7 +163,6 @@ int LUKS2_digest_verify_by_segment(struct crypt_device *cd,
 	int segment,
 	const struct volume_key *vk)
 {
-	const digest_handler *h;
 	int digest, r;
 
 	digest = LUKS2_digest_by_segment(cd, hdr, segment);
@@ -162,17 +171,24 @@ int LUKS2_digest_verify_by_segment(struct crypt_device *cd,
 
 	log_dbg("Verifying key digest %d.", digest);
 
-	h = LUKS2_digest_handler(cd, digest);
-	if (!h)
-		return -EINVAL;
+	r = _digest_verify(cd, digest, vk);
 
-	r = h->verify(cd, digest, vk->key, vk->keylength);
-	if (r < 0) {
-		log_dbg("Digest %d (%s) verify failed with %d.", digest, h->name, r);
-		return r;
+	return r < 0 ? r : digest;
+}
+
+int LUKS2_digest_any_matching(struct crypt_device *cd,
+		struct luks2_hdr *hdr,
+		const struct volume_key *vk)
+{
+	int digest;
+
+	for (digest = 0; digest < LUKS2_DIGEST_MAX; digest++) {
+		if (_digest_verify(cd, digest, vk) < 0)
+			continue;
+		return digest;
 	}
 
-	return digest;
+	return -ENOENT;
 }
 
 /* FIXME: segment can have more digests */

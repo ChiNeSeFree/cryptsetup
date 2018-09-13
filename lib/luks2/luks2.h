@@ -261,6 +261,10 @@ int LUKS2_tokens_count(struct luks2_hdr *hdr);
 /*
  * Generic LUKS2 digest
  */
+int LUKS2_digest_any_matching(struct crypt_device *cd,
+		struct luks2_hdr *hdr,
+		const struct volume_key *vk);
+
 int LUKS2_digest_by_segment(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
 	int segment);
