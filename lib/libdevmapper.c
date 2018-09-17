@@ -2571,7 +2571,7 @@ int dm_is_dm_kernel_name(const char *name)
 }
 
 int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_size,
-	struct device *data_device, struct volume_key *vk, const char *cipher,
+	struct device *data_device, const struct volume_key *vk, const char *cipher,
 	size_t iv_offset, size_t data_offset, const char *integrity, uint32_t tag_size,
 	uint32_t sector_size)
 {
@@ -2594,7 +2594,7 @@ int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_siz
 	tgt->data_device = data_device;
 
 	tgt->type = DM_CRYPT;
-	tgt->u.crypt.vk = vk;
+	tgt->u.crypt.vk = (struct volume_key *)vk;
 	tgt->offset = seg_offset;
 	tgt->size = seg_size;
 
