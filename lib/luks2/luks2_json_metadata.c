@@ -2002,3 +2002,14 @@ void LUKS2_hdr_repair(json_object *hdr_jobj)
 
 	LUKS2_keyslots_repair(jobj_keyslots);
 }
+
+int json_object_object_add_by_uint(json_object *jobj, unsigned key, json_object *jobj_val)
+{
+	int r;
+	char key_name[4];
+
+	r = snprintf(key_name, sizeof(key_name), "%u", key);
+	if (r < 0 || (size_t)r >= sizeof(key_name))
+		return -EINVAL;
+	return json_object_object_add(jobj, key_name, jobj_val);
+}

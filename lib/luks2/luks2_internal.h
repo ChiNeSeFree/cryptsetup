@@ -63,6 +63,8 @@ uint64_t json_object_get_uint64(json_object *jobj);
 uint32_t json_object_get_uint32(json_object *jobj);
 json_object *json_object_new_uint64(uint64_t value);
 
+int json_object_object_add_by_uint(json_object *jobj, unsigned key, json_object *jobj_val);
+
 void JSON_DBG(json_object *jobj, const char *desc);
 
 /*
