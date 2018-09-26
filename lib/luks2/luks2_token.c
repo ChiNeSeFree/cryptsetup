@@ -149,19 +149,18 @@ int LUKS2_token_create(struct crypt_device *cd,
 	if (!json_object_object_get_ex(hdr->jobj, "tokens", &jobj_tokens))
 		return -EINVAL;
 
+	snprintf(num, sizeof(num), "%d", token);
+
 	/* Remove token */
-	if (!json) {
-		snprintf(num, sizeof(num), "%d", token);
+	if (!json)
 		json_object_object_del(jobj_tokens, num);
-	} else {
+	else {
 
 		jobj = json_tokener_parse_verbose(json, &jerr);
 		if (!jobj) {
 			log_dbg("Token JSON parse failed.");
 			return -EINVAL;
 		}
-
-		snprintf(num, sizeof(num), "%d", token);
 
 		if (LUKS2_token_validate(hdr->jobj, jobj, num)) {
 			json_object_put(jobj);
@@ -252,7 +251,6 @@ int LUKS2_builtin_token_create(struct crypt_device *cd,
 	int commit)
 {
 	const token_handler *th;
-	char num[16];
 	int r;
 	json_object *jobj_token, *jobj_tokens;
 
@@ -267,7 +265,6 @@ int LUKS2_builtin_token_create(struct crypt_device *cd,
 	}
 	if (token < 0 || token >= LUKS2_TOKENS_MAX)
 		return -EINVAL;
-	snprintf(num, sizeof(num), "%u", token);
 
 	r = th->set(&jobj_token, params);
 	if (r) {
@@ -283,10 +280,10 @@ int LUKS2_builtin_token_create(struct crypt_device *cd,
 	assert(!r);
 
 	json_object_object_get_ex(hdr->jobj, "tokens", &jobj_tokens);
-	json_object_object_add(jobj_tokens, num, jobj_token);
+	json_object_object_add_by_uint(jobj_tokens, token, jobj_token);
 	if (LUKS2_check_json_size(hdr)) {
 		log_dbg("Not enough space in header json area for new %s token.", type);
-		json_object_object_del(jobj_tokens, num);
+		json_object_object_del_by_uint(jobj_tokens, token);
 		return -ENOSPC;
 	}
 
