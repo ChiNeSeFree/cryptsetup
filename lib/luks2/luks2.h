@@ -166,6 +166,12 @@ struct luks2_reenc_context {
 	/* already running reencryption */
 	json_object *jobj_segs_pre;
 	json_object *jobj_segs_after;
+
+	/* backup segments */
+	json_object *jobj_segment_new;
+	int digest_new;
+	json_object *jobj_segment_old;
+	int digest_old;
 };
 
 int LUKS2_reenc_create_segments(struct crypt_device *cd,
@@ -272,10 +278,7 @@ int LUKS2_keyslot_reencrypt_create(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
 	int keyslot,
 	const char *reencrypt_mode,
-	int digest,
-	const char *cipher,
-	int64_t data_shift,
-	struct crypt_params_luks2 *params);
+	int64_t data_shift);
 
 int reenc_keyslot_update(struct crypt_device *cd,
 	const struct luks2_reenc_context *rh);
@@ -377,7 +380,19 @@ json_object *LUKS2_segment_create_crypt(uint64_t offset,
 
 json_object *LUKS2_segment_create_linear(uint64_t offset, uint64_t *length, unsigned reencryption);
 
-json_object *LUKS2_segment_copy(json_object *jobj_seg);
+int LUKS2_segment_first_unused_id(struct luks2_hdr *hdr);
+
+int LUKS2_segment_set_flag(json_object *jobj_segment, const char *flag);
+
+json_object *LUKS2_get_segment_by_flag(struct luks2_hdr *hdr, const char *flag);
+
+json_object *json_segments_get_segment_by_flag(json_object *jobj_segments, const char *flag);
+
+int LUKS2_get_segment_id_by_flag(struct luks2_hdr *hdr, const char *flag);
+
+int LUKS2_segment_ignore(json_object *jobj_segment);
+
+json_object *LUKS2_get_ignored_segments(struct luks2_hdr *hdr);
 
 int LUKS2_segments_set(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
@@ -411,7 +426,6 @@ int LUKS2_get_default_segment(struct luks2_hdr *hdr);
 json_object *LUKS2_get_segments_jobj(struct luks2_hdr *hdr);
 json_object *LUKS2_get_segment_jobj(struct luks2_hdr *hdr, int segment);
 
-uint64_t LUKS2_reencrypt_data_offset(struct luks2_hdr *hdr);
 json_object *LUKS2_reencrypt_segment_new(struct luks2_hdr *hdr);
 json_object *LUKS2_reencrypt_segment_old(struct luks2_hdr *hdr);
 const char *LUKS2_reencrypt_segment_cipher_new(struct luks2_hdr *hdr);

@@ -2995,6 +2995,7 @@ static int _open_and_activate_luks2(struct crypt_device *cd,
 		if (LUKS2_segments_count(hdr) == 1) {
 			/* FIXME: remove also keyslots assigned to old digest */
 			crypt_keyslot_destroy(cd, rh.reenc_keyslot);
+			reenc_erase_backup_segments(cd, hdr);
 			update_reencryption_flag(cd, 0);
 		}
 		/* reload */

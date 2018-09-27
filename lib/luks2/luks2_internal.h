@@ -69,6 +69,9 @@ json_object *json_object_new_int64_ex(int64_t value);
 int json_object_object_add_by_uint(json_object *jobj, unsigned key, json_object *jobj_val);
 void json_object_object_del_by_uint(json_object *jobj, unsigned key);
 
+/* *jobj_dst must contain NULL */
+int json_object_copy(json_object *jobj_src, json_object **jobj_dst);
+
 /*
  * JSON segment access helpers
  */
@@ -153,10 +156,7 @@ typedef struct  {
 int reenc_keyslot_alloc(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
 	int keyslot,
-	const char *mode,
-	int digest,
-	const char *cipher,
-	uint32_t sector_size,
+	const char *reenc_mode,
 	int64_t data_shift);
 
 /**

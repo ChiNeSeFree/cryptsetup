@@ -88,9 +88,42 @@ int json_segment_get_sector_size(json_object *jobj_segment)
 	return json_object_get_int(jobj);
 }
 
+int LUKS2_segment_ignore(json_object *jobj_segment)
+{
+	int i;
+	json_object *jobj_flags, *jobj;
+
+	if (!jobj_segment)
+		return 0;
+
+	json_object_object_get_ex(jobj_segment, "flags", &jobj_flags);
+
+	if (!jobj_flags)
+		return 0;
+
+	for (i = 0; i < json_object_array_length(jobj_flags); i++) {
+		jobj = json_object_array_get_idx(jobj_flags, i);
+		if (!strncmp(json_object_get_string(jobj), "reencrypt-", 10))
+			return 1;
+	}
+
+	return 0;
+}
+
 int json_segments_count(json_object *jobj_segments)
 {
-	return !jobj_segments ? -EINVAL : json_object_object_length(jobj_segments);
+	int count = 0;
+
+	if (!jobj_segments)
+		return -EINVAL;
+
+	json_object_object_foreach(jobj_segments, slot, val) {
+		UNUSED(slot);
+		if (!LUKS2_segment_ignore(val))
+			count++;
+	}
+
+	return count;
 }
 
 uint64_t json_segments_get_first_data_offset(json_object *jobj_segments, unsigned blockwise)
@@ -160,6 +193,8 @@ int LUKS2_last_segment_by_type(struct luks2_hdr *hdr, const char *type)
 		return -1;
 
 	json_object_object_foreach(jobj_segments, slot, val) {
+		if (LUKS2_segment_ignore(val))
+			continue;
 		if (strcmp(type, json_segment_type(val) ?: ""))
 			continue;
 
@@ -176,12 +211,14 @@ int LUKS2_segment_by_type(struct luks2_hdr *hdr, const char *type)
 	int first_found = -1;
 
 	if (!type)
-		return -1;
+		return -EINVAL;
 
 	if (!json_object_object_get_ex(hdr->jobj, "segments", &jobj_segments))
-		return -1;
+		return -EINVAL;
 
 	json_object_object_foreach(jobj_segments, slot, val) {
+		if (LUKS2_segment_ignore(val))
+			continue;
 		if (strcmp(type, json_segment_type(val) ?: ""))
 			continue;
 
@@ -194,7 +231,30 @@ int LUKS2_segment_by_type(struct luks2_hdr *hdr, const char *type)
 	return first_found;
 }
 
-static json_object *_segment_create_generic(const char *type, uint64_t offset, uint64_t *length, unsigned reencryption)
+int LUKS2_segment_first_unused_id(struct luks2_hdr *hdr)
+{
+	json_object *jobj_segments;
+	int id, last_id = -1;
+
+	if (!json_object_object_get_ex(hdr->jobj, "segments", &jobj_segments))
+		return -EINVAL;
+
+	json_object_object_foreach(jobj_segments, slot, val) {
+		id = atoi(slot);
+		if (id > last_id)
+			last_id = id;
+	}
+
+	return last_id + 1;
+}
+
+static void _add_reencryption_field(json_object *jobj)
+{
+	if (jobj)
+		json_object_object_add(jobj, "reencryption", json_object_new_string("in-progress"));
+}
+
+static json_object *_segment_create_generic(const char *type, uint64_t offset, uint64_t *length)
 {
 	json_object *jobj = json_object_new_object();
 	if (!jobj)
@@ -203,15 +263,16 @@ static json_object *_segment_create_generic(const char *type, uint64_t offset, u
 	json_object_object_add(jobj, "type",		json_object_new_string(type));
 	json_object_object_add(jobj, "offset",		json_object_new_uint64(offset));
 	json_object_object_add(jobj, "size",		length ? json_object_new_uint64(*length) : json_object_new_string("dynamic"));
-	if (reencryption)
-		json_object_object_add(jobj, "reencryption", json_object_new_string("in-progress"));
 
 	return jobj;
 }
 
 json_object *LUKS2_segment_create_linear(uint64_t offset, uint64_t *length, unsigned reencryption)
 {
-	return _segment_create_generic("linear", offset, length, reencryption);
+	json_object *jobj = _segment_create_generic("linear", offset, length);
+	if (reencryption)
+		_add_reencryption_field(jobj);
+	return jobj;
 }
 
 json_object *LUKS2_segment_create_crypt(uint64_t offset,
@@ -219,52 +280,39 @@ json_object *LUKS2_segment_create_crypt(uint64_t offset,
 				  const char *cipher, uint32_t sector_size,
 				  unsigned reencryption)
 {
-	json_object *jobj = _segment_create_generic("crypt", offset, length, reencryption);
+	json_object *jobj = _segment_create_generic("crypt", offset, length);
 	if (!jobj)
 		return NULL;
 
 	json_object_object_add(jobj, "iv_tweak",	json_object_new_uint64(iv_offset));
 	json_object_object_add(jobj, "encryption",	json_object_new_string(cipher));
 	json_object_object_add(jobj, "sector_size",	json_object_new_int(sector_size));
+	if (reencryption)
+		_add_reencryption_field(jobj);
 
 	return jobj;
 }
 
-/* FIXME: json-c may already have deep copy fn */
-json_object *LUKS2_segment_copy(json_object *jobj_seg)
+int LUKS2_segment_set_flag(json_object *jobj_segment, const char *flag)
 {
-	const char *type;
-	json_object *jobj_type, *jobj_copy, *jobj_offset, *jobj_size, *jobj;
-	uint64_t tmp;
+	json_object *jobj_flags;
 
-	if (!jobj_seg)
-		return NULL;
+	if (!jobj_segment || !flag)
+		return -EINVAL;
 
-	json_object_object_get_ex(jobj_seg, "type", &jobj_type);
-	json_object_object_get_ex(jobj_seg, "offset", &jobj_offset);
-	json_object_object_get_ex(jobj_seg, "size", &jobj_size);
+	if (!json_object_object_get_ex(jobj_segment, "flags", &jobj_flags)) {
+		jobj_flags = json_object_new_array();
+		if (!jobj_flags)
+			return -ENOMEM;
+		json_object_object_add(jobj_segment, "flags", jobj_flags);
+	}
 
-	type = json_object_get_string(jobj_type);
+	if (LUKS2_array_jobj(jobj_flags, flag))
+		return 0;
 
-	tmp = json_object_get_uint64(jobj_size);
-	jobj_copy = _segment_create_generic(type,
-					    json_object_get_uint64(jobj_offset),
-					    tmp ? &tmp : NULL,
-					    json_object_object_get_ex(jobj_seg, "reencryption", NULL));
-	if (!jobj_copy)
-		return NULL;
+	json_object_array_add(jobj_flags, json_object_new_string(flag));
 
-	if (strcmp(type, "crypt"))
-		return jobj_copy;
-
-	json_object_object_get_ex(jobj_seg, "iv_tweak", &jobj);
-	json_object_object_add(jobj_copy, "iv_tweak", json_object_new_string(json_object_get_string(jobj)));
-	json_object_object_get_ex(jobj_seg, "encryption", &jobj);
-	json_object_object_add(jobj_copy, "encryption", json_object_new_string(json_object_get_string(jobj)));
-	json_object_object_get_ex(jobj_seg, "sector_size", &jobj);
-	json_object_object_add(jobj_copy, "sector_size", json_object_new_int(json_object_get_int(jobj)));
-
-	return jobj_copy;
+	return 0;
 }
 
 int LUKS2_segments_set(struct crypt_device *cd, struct luks2_hdr *hdr,
@@ -290,4 +338,74 @@ int LUKS2_segments_count(struct luks2_hdr *hdr)
 const char *LUKS2_debug_dump_segments(struct luks2_hdr *hdr)
 {
 	return json_object_to_json_string_ext(LUKS2_get_segments_jobj(hdr), JSON_C_TO_STRING_PRETTY);
+}
+
+static void _get_segment_or_id_by_flag(json_object *jobj_segments, const char *flag, unsigned id, void *retval)
+{
+	json_object *jobj_flags, **jobj_ret = (json_object **)retval;
+	int *ret = (int *)retval;
+
+	if (!flag)
+		return;
+
+	json_object_object_foreach(jobj_segments, key, value) {
+		if (!json_object_object_get_ex(value, "flags", &jobj_flags))
+			continue;
+		if (LUKS2_array_jobj(jobj_flags, flag)) {
+			if (id)
+				*ret = atoi(key);
+			else
+				*jobj_ret = value;
+			return;
+		}
+	}
+}
+
+int LUKS2_get_segment_id_by_flag(struct luks2_hdr *hdr, const char *flag)
+{
+	int ret = -ENOENT;
+	json_object *jobj_segments = LUKS2_get_segments_jobj(hdr);
+
+	if (jobj_segments)
+		_get_segment_or_id_by_flag(jobj_segments, flag, 1, &ret);
+
+	return ret;
+}
+
+json_object *LUKS2_get_segment_by_flag(struct luks2_hdr *hdr, const char *flag)
+{
+	json_object *jobj_segment = NULL,
+		    *jobj_segments = LUKS2_get_segments_jobj(hdr);
+
+	if (jobj_segments)
+		_get_segment_or_id_by_flag(jobj_segments, flag, 0, &jobj_segment);
+
+	return jobj_segment;
+}
+
+json_object *LUKS2_get_ignored_segments(struct luks2_hdr *hdr)
+{
+	json_object *jobj_segments, *jobj = json_object_new_object();
+	int i = 0;
+
+	if (!jobj || !json_object_object_get_ex(hdr->jobj, "segments", &jobj_segments))
+		return NULL;
+
+	json_object_object_foreach(jobj_segments, key, value) {
+		UNUSED(key);
+		if (LUKS2_segment_ignore(value))
+			json_object_object_add_by_uint(jobj, i++, json_object_get(value));
+	}
+
+	return jobj;
+}
+
+json_object *json_segments_get_segment_by_flag(json_object *jobj_segments, const char *flag)
+{
+	json_object *jobj_segment = NULL;
+
+	if (jobj_segments)
+		_get_segment_or_id_by_flag(jobj_segments, flag, 0, &jobj_segment);
+
+	return jobj_segment;
 }

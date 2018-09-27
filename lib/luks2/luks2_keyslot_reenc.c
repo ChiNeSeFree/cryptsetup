@@ -35,15 +35,10 @@ int reenc_keyslot_alloc(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
 	int keyslot,
 	const char *reenc_mode, /* reencrypt or encrypt */
-	int digest,
-	const char *cipher,
-	uint32_t sector_size,
 	int64_t data_shift)
 {
-	int old_digest;
 	int r;
-	json_object *jobj_keyslots, *jobj_keyslot, *jobj_area, *jobj_init,
-		    *jobj_digest_new, *jobj_digest_old, *jobj_segment_new;
+	json_object *jobj_keyslots, *jobj_keyslot, *jobj_area;
 	uint64_t area_offset, area_length;
 
 	log_dbg("Allocating reencrypt keyslot %d.", keyslot);
@@ -70,12 +65,12 @@ int reenc_keyslot_alloc(struct crypt_device *cd,
 		return -ENOMEM;
 
 	jobj_area = json_object_new_object();
-	jobj_init = json_object_new_object();
 
-	/* initial setting is irrelevant. Type can be changed during reencryption */
-	if (data_shift)
-		json_object_object_add(jobj_area, "type", json_object_new_string("shift")); /* "noop", "checksum", "journal", "shift" */
-	else
+	if (data_shift) {
+		json_object_object_add(jobj_area, "type", json_object_new_string("shift"));
+		json_object_object_add(jobj_area, "data_shift", json_object_new_int64_ex(data_shift));
+	} else
+		/* except data shift protection, initial setting is irrelevant. Type can be changed during reencryption */
 		json_object_object_add(jobj_area, "type", json_object_new_string("noop"));
 
 	json_object_object_add(jobj_area, "offset", json_object_new_uint64(area_offset));
@@ -85,42 +80,7 @@ int reenc_keyslot_alloc(struct crypt_device *cd,
 	json_object_object_add(jobj_keyslot, "key_size", json_object_new_int(1)); /* useless but mandatory */
 	json_object_object_add(jobj_keyslot, "mode", json_object_new_string(reenc_mode));
 
-	/* FIXME: error path */
-	if (!strcmp(reenc_mode, "reencrypt") || !strcmp(reenc_mode, "decrypt")) {
-		old_digest = LUKS2_digest_by_segment(cd, hdr, 0);
-		if (old_digest < 0)
-			return -EINVAL;
-		jobj_digest_old = json_object_new_int(old_digest);
-	}
-
-	if (strcmp(reenc_mode, "decrypt")) {
-		jobj_digest_new = json_object_new_int(digest);
-
-		/* new segment stored in keyslot initialization section */
-		/* TODO: for encryption we need to add also the first segment location + size */
-		jobj_segment_new = LUKS2_segment_create_crypt(
-							crypt_get_data_offset(cd) * SECTOR_SIZE,
-							crypt_get_iv_offset(cd),
-							NULL, cipher, sector_size, 0);
-
-		json_object_object_add(jobj_init, "new_segment", jobj_segment_new);
-
-		/* digests of both segments */
-		json_object_object_add(jobj_init, "new_segment_digest", jobj_digest_new);
-	}
-
-	//json_segment_old = LUKS2_segment_copy(LUKS2_get_segment_jobj(hdr, CRYPT_DEFAULT_SEGMENT));
-
-	//json_object_new_uint64
-	json_object_object_add(jobj_init, "data_shift", json_object_new_int64_ex(data_shift));
-
-	if (!strcmp(reenc_mode, "reencrypt") || !strcmp(reenc_mode, "decrypt")) {
-		json_object_object_add(jobj_init, "old_segment", json_object_get(LUKS2_get_segment_jobj(hdr, 0)));
-		json_object_object_add(jobj_init, "old_segment_digest", jobj_digest_old);
-	}
-
 	json_object_object_add(jobj_keyslot, "area", jobj_area);
-	json_object_object_add(jobj_keyslot, "segments", jobj_init);
 
 	json_object_object_add_by_uint(jobj_keyslots, keyslot, jobj_keyslot);
 	if (LUKS2_check_json_size(hdr)) {
@@ -277,30 +237,12 @@ const keyslot_handler reenc_keyslot = {
 
 static json_object *reencrypt_segment(struct luks2_hdr *hdr, unsigned new)
 {
-	json_object *jobj_keyslot, *jobj_segment, *jobj_segments;
-	int ks = LUKS2_find_keyslot(NULL, hdr, "reencrypt");
-
-	if (ks < 0)
-		return NULL;
-
-	jobj_keyslot = LUKS2_get_keyslot_jobj(hdr, ks);
-
-	json_object_object_get_ex(jobj_keyslot, "segments", &jobj_segments);
-	if (!json_object_object_get_ex(jobj_segments, new ? "new_segment" : "old_segment", &jobj_segment))
-		return NULL;
-
-	return jobj_segment;
+	return LUKS2_get_segment_by_flag(hdr, new ? "reencrypt-final" : "reencrypt-previous");
 }
 
 json_object *LUKS2_reencrypt_segment_new(struct luks2_hdr *hdr)
 {
 	return reencrypt_segment(hdr, 1);
-}
-
-uint64_t LUKS2_reencrypt_data_offset(struct luks2_hdr *hdr)
-{
-	int new = strcmp(LUKS2_reencrypt_mode(hdr), "decrypt");
-	return json_segment_get_offset(reencrypt_segment(hdr, new), 1);
 }
 
 json_object *LUKS2_reencrypt_segment_old(struct luks2_hdr *hdr)
@@ -310,56 +252,42 @@ json_object *LUKS2_reencrypt_segment_old(struct luks2_hdr *hdr)
 
 const char *LUKS2_reencrypt_segment_cipher_new(struct luks2_hdr *hdr)
 {
-	return json_segment_get_cipher(LUKS2_reencrypt_segment_new(hdr));
+	return json_segment_get_cipher(reencrypt_segment(hdr, 1));
 }
 
 const char *LUKS2_reencrypt_segment_cipher_old(struct luks2_hdr *hdr)
 {
-	return json_segment_get_cipher(LUKS2_reencrypt_segment_old(hdr));
+	return json_segment_get_cipher(reencrypt_segment(hdr, 0));
 }
 
 int LUKS2_reencrypt_get_sector_size_new(struct luks2_hdr *hdr)
 {
-	return json_segment_get_sector_size(LUKS2_reencrypt_segment_new(hdr));
+	return json_segment_get_sector_size(reencrypt_segment(hdr, 1));
 }
 
 int LUKS2_reencrypt_get_sector_size_old(struct luks2_hdr *hdr)
 {
-	return json_segment_get_sector_size(LUKS2_reencrypt_segment_old(hdr));
+	return json_segment_get_sector_size(reencrypt_segment(hdr, 0));
+}
+
+static int _reencrypt_digest(struct luks2_hdr *hdr, unsigned new)
+{
+	int segment = LUKS2_get_segment_id_by_flag(hdr, new ? "reencrypt-final" : "reencrypt-previous");
+
+	if (segment < 0)
+		return segment;
+
+	return LUKS2_digest_by_segment(NULL, hdr, segment);
 }
 
 int LUKS2_reencrypt_digest_new(struct luks2_hdr *hdr)
 {
-	json_object *jobj_keyslot, *jobj_segments, *jobj_digest;
-	int ks = LUKS2_find_keyslot(NULL, hdr, "reencrypt");
-
-	if (ks < 0)
-		return -EINVAL;
-
-	jobj_keyslot = LUKS2_get_keyslot_jobj(hdr, ks);
-
-	json_object_object_get_ex(jobj_keyslot, "segments", &jobj_segments);
-	if (!json_object_object_get_ex(jobj_segments, "new_segment_digest", &jobj_digest))
-		return -ENOENT;
-
-	return json_object_get_int(jobj_digest);
+	return _reencrypt_digest(hdr, 1);
 }
 
 int LUKS2_reencrypt_digest_old(struct luks2_hdr *hdr)
 {
-	json_object *jobj_keyslot, *jobj_segments, *jobj_digest;
-	int ks = LUKS2_find_keyslot(NULL, hdr, "reencrypt");
-
-	if (ks < 0)
-		return -EINVAL;
-
-	jobj_keyslot = LUKS2_get_keyslot_jobj(hdr, ks);
-
-	json_object_object_get_ex(jobj_keyslot, "segments", &jobj_segments);
-	if (!json_object_object_get_ex(jobj_segments, "old_segment_digest", &jobj_digest))
-		return -ENOENT;
-
-	return json_object_get_int(jobj_digest);
+	return _reencrypt_digest(hdr, 0);
 }
 
 /* noop, checksums, journal or shift */
@@ -430,7 +358,7 @@ static json_object *_enc_create_segments_shift_after(struct crypt_device *cd,
 	uint64_t data_offset)
 {
 	int reenc_seg, i = 0;
-	json_object *jobj_seg_new, *jobj_copy, *jobj_segs_after = json_object_new_object();
+	json_object *jobj_copy, *jobj_seg_new = NULL, *jobj_segs_after = json_object_new_object();
 	uint64_t tmp;
 
 	if (!rh->jobj_segs_pre || !jobj_segs_after)
@@ -450,10 +378,8 @@ static json_object *_enc_create_segments_shift_after(struct crypt_device *cd,
 		json_object_object_add_by_uint(jobj_segs_after, i++, json_object_get(jobj_copy));
 	}
 
-	jobj_seg_new = LUKS2_segment_copy(json_segments_get_segment(rh->jobj_segs_pre, reenc_seg + 1));
-	if (!jobj_seg_new) {
-		jobj_seg_new = LUKS2_segment_copy(json_segments_get_segment(rh->jobj_segs_pre, reenc_seg));
-		if (!jobj_seg_new)
+	if (json_object_copy(json_segments_get_segment(rh->jobj_segs_pre, reenc_seg + 1), &jobj_seg_new)) {
+		if (json_object_copy(json_segments_get_segment(rh->jobj_segs_pre, reenc_seg), &jobj_seg_new))
 			goto err;
 		json_object_object_del(jobj_seg_new, "reencryption");
 		tmp = rh->length;
@@ -513,8 +439,8 @@ static json_object *_enc_create_segments_shift_pre(struct crypt_device *cd,
 
 	segment_size = LUKS2_segment_size(hdr, sg, 0);
 	if (segment_size > rh->length) {
-		jobj_seg_shrunk = LUKS2_segment_copy(LUKS2_get_segment_jobj(hdr, sg));
-		if (!jobj_seg_shrunk)
+		jobj_seg_shrunk = NULL;
+		if (json_object_copy(LUKS2_get_segment_jobj(hdr, sg), &jobj_seg_shrunk))
 			goto err;
 		json_object_object_add(jobj_seg_shrunk, "size", json_object_new_uint64(segment_size - rh->length));
 		json_object_object_add_by_uint(jobj_segs_pre, sg++, jobj_seg_shrunk);
@@ -667,7 +593,7 @@ static json_object *_LUKS2_dec_create_segments_pre(struct crypt_device *cd,
 	uint64_t device_size,
 	uint64_t data_offset)
 {
-	json_object *jobj_dec_seg, *jobj_old_seg, *jobj_new_seg,
+	json_object *jobj_dec_seg, *jobj_new_seg, *jobj_old_seg = NULL,
 		    *jobj_segs_pre = json_object_new_object();
 	int sg = 0;
 	uint64_t tmp = rh->offset + rh->length;
@@ -676,8 +602,7 @@ static json_object *_LUKS2_dec_create_segments_pre(struct crypt_device *cd,
 		return NULL;
 
 	if (rh->offset) {
-		jobj_old_seg = LUKS2_segment_copy(LUKS2_get_segment_jobj(hdr, 0));
-		if (!jobj_old_seg)
+		if (json_object_copy(LUKS2_get_segment_jobj(hdr, 0), &jobj_old_seg))
 			goto err;
 
 		json_object_object_add(jobj_old_seg, "size", json_object_new_uint64(rh->offset));
@@ -875,7 +800,7 @@ int LUKS2_reenc_create_segments(struct crypt_device *cd,
 
 int64_t LUKS2_reencrypt_data_shift(struct luks2_hdr *hdr)
 {
-	json_object *jobj_keyslot, *jobj_segments, *jobj_data_shift;
+	json_object *jobj_keyslot, *jobj_area, *jobj_data_shift;
 	int ks = LUKS2_find_keyslot(NULL, hdr, "reencrypt");
 
 	if (ks < 0)
@@ -883,8 +808,8 @@ int64_t LUKS2_reencrypt_data_shift(struct luks2_hdr *hdr)
 
 	jobj_keyslot = LUKS2_get_keyslot_jobj(hdr, ks);
 
-	json_object_object_get_ex(jobj_keyslot, "segments", &jobj_segments);
-	if (!json_object_object_get_ex(jobj_segments, "data_shift", &jobj_data_shift))
+	json_object_object_get_ex(jobj_keyslot, "area", &jobj_area);
+	if (!json_object_object_get_ex(jobj_area, "data_shift", &jobj_data_shift))
 		return 0;
 
 	return json_object_get_int64_ex(jobj_data_shift);

@@ -182,38 +182,13 @@ json_object *LUKS2_get_segments_jobj(struct luks2_hdr *hdr)
 	return jobj1;
 }
 
-/* FIXME: This function is broken. And so is default segment concept */
 int LUKS2_get_default_segment(struct luks2_hdr *hdr)
 {
-	const char *mode;
-	int ks;
+	int s = LUKS2_get_segment_id_by_flag(hdr, "reencrypt-final");
+	if (s >= 0)
+		return s;
 
-	ks = LUKS2_find_keyslot(NULL, hdr, "reencrypt");
-	if (ks < 0) {
-		if (LUKS2_segments_count(hdr) == 1)
-			return 0;
-		return -EINVAL;
-	}
-
-	mode = LUKS2_reencrypt_mode(hdr);
-
-	if (!strcmp(mode, "encrypt"))
-		return LUKS2_last_segment_by_type(hdr, "crypt");
-	if (strcmp(mode, "reencrypt"))
-		return -EINVAL;
-
-	/* new, new (in-reencrypt), old */
-	/* just new or old which may be wrong, but whole function is broken */
-	if (LUKS2_segments_count(hdr) == 3 || LUKS2_segments_count(hdr) == 1)
-		return 0;
-
-	/*
-	 * either: new, new (in-reencrypt)
-	 *
-	 * or: new (in-reencrypt), old
-	 */
-	if (LUKS2_segments_count(hdr) == 2 &&
-	    json_segments_segment_in_reencrypt(LUKS2_get_segments_jobj(hdr)) == 1)
+	if (LUKS2_segments_count(hdr) == 1)
 		return 0;
 
 	return -EINVAL;
@@ -221,31 +196,14 @@ int LUKS2_get_default_segment(struct luks2_hdr *hdr)
 
 static json_object *LUKS2_get_default_segment_jobj(struct luks2_hdr *hdr)
 {
-	int ks;
-	json_object *jobj_keyslot, *jobj_segment, *jobj1;
+	json_object *jobj = LUKS2_get_segment_by_flag(hdr, "reencrypt-final");
+	if (jobj)
+		return jobj;
 
-	ks = LUKS2_find_keyslot(NULL, hdr, "reencrypt");
-	if (ks < 0) {
-		if (LUKS2_segments_count(hdr) == 1)
-			return LUKS2_get_segment_jobj(hdr, 0);
-		return NULL;
-	}
+	if (LUKS2_segments_count(hdr) == 1)
+		return LUKS2_get_segment_jobj(hdr, 0);
 
-	jobj_keyslot = LUKS2_get_keyslot_jobj(hdr, ks);
-	if (!jobj_keyslot)
-		return NULL;
-
-	/* FIXME: decide based on 'encryption' or 'reencryption' */
-
-	/* reencryption already in-progress (validation) */
-	if (!json_object_object_get_ex(jobj_keyslot, "segments", &jobj1))
-		return NULL;
-
-	json_object_object_get_ex(jobj1, "new_segment", &jobj_segment);
-
-	log_dbg("Found default segment in reencrypt keyslot");
-
-	return jobj_segment;
+	return NULL;
 }
 
 json_object *LUKS2_get_segment_jobj(struct luks2_hdr *hdr, int segment)
@@ -386,6 +344,7 @@ json_object *json_contains(json_object *jobj, const char *name,
 }
 
 /* use only on already validated 'segments' object */
+/* FIXME: move to segment.c */
 static uint64_t get_first_data_offset(json_object *jobj_segs, const char *type)
 {
 	json_object *jobj_offset, *jobj_type;
@@ -1797,17 +1756,19 @@ int LUKS2_hdr_dump(struct crypt_device *cd, struct luks2_hdr *hdr)
 
 uint64_t LUKS2_get_data_offset(struct luks2_hdr *hdr)
 {
-	json_object *jobj1;
-	luks2_reencrypt_info ri;
+	json_object *jobj_segments, *jobj;
 
-	if (!json_object_object_get_ex(hdr->jobj, "segments", &jobj1))
+	if (!json_object_object_get_ex(hdr->jobj, "segments", &jobj_segments))
 		return 0;
 
-	ri = LUKS2_reenc_status(hdr);
-	if (ri > REENCRYPT_NONE && ri < REENCRYPT_INVALID)
-		return LUKS2_reencrypt_data_offset(hdr);
+	jobj = LUKS2_get_segment_by_flag(hdr, "reencrypt-final");
+	if (!jobj)
+		jobj = LUKS2_get_segment_by_flag(hdr, "reencrypt-previous");
 
-	return get_first_data_offset(jobj1, NULL) >> SECTOR_SHIFT;
+	if (jobj)
+		return json_segment_get_offset(jobj, 1);
+
+	return get_first_data_offset(jobj_segments, NULL) >> SECTOR_SHIFT;
 }
 
 luks2_reencrypt_info LUKS2_reenc_status(struct luks2_hdr *hdr)
@@ -2216,7 +2177,7 @@ static int _activate_custom_multi(struct crypt_device *cd,
 	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
 	struct crypt_dm_active_device dmd = {
 		.uuid   = crypt_get_uuid(cd),
-		.segment_count = json_object_object_length(jobj_segments)
+		.segment_count = json_segments_count(jobj_segments)
 	};
 	char dm_int_name[512], dm_int_dev_name[PATH_MAX];
 	uint64_t data_offset, segment_size, segment_offset, segment_start = 0;
@@ -2442,6 +2403,18 @@ void json_object_object_del_by_uint(json_object *jobj, unsigned key)
 	r = snprintf(key_name, sizeof(key_name), "%u", key);
 	if (r >= 0 && (size_t)r < sizeof(key_name))
 		json_object_object_del(jobj, key_name);
+}
+
+/* TODO: implement fallback method for missing json_object_deep_copy() */
+int json_object_copy(json_object *jobj_src, json_object **jobj_dst)
+{
+	if (!jobj_src)
+		return -EINVAL;
+
+	return json_object_deep_copy(jobj_src, jobj_dst, NULL);
+	/* fallback is:
+	 * json_tokener_parse(json_object_get_string(src)).
+	 */
 }
 
 int json_object_object_add_by_uint(json_object *jobj, unsigned key, json_object *jobj_val)

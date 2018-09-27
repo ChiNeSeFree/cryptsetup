@@ -49,6 +49,10 @@ void LUKS2_reenc_context_destroy(struct luks2_reenc_context *rh)
 	rh->jobj_segs_pre = NULL;
 	json_object_put(rh->jobj_segs_after);
 	rh->jobj_segs_after = NULL;
+	json_object_put(rh->jobj_segment_old);
+	rh->jobj_segment_old = NULL;
+	json_object_put(rh->jobj_segment_new);
+	rh->jobj_segment_new = NULL;
 }
 
 static int _load_segments_crashed(struct crypt_device *cd,
@@ -65,8 +69,11 @@ static int _load_segments_crashed(struct crypt_device *cd,
 	if (!rh->jobj_segs_pre)
 		return -ENOMEM;
 
-	json_object_object_foreach(LUKS2_get_segments_jobj(hdr), key, val)
+	json_object_object_foreach(LUKS2_get_segments_jobj(hdr), key, val) {
+		if (LUKS2_segment_ignore(val))
+			continue;
 		json_object_object_add(rh->jobj_segs_pre, key, json_object_get(val));
+	}
 
 	r = LUKS2_reenc_create_segments_after(cd, hdr, rh, data_offset);
 	if (r) {
@@ -121,6 +128,30 @@ static int _load_segments(struct crypt_device *cd, struct luks2_hdr *hdr, struct
 	}
 
 	return r;
+}
+
+/* returns void because it must not fail on valid LUKS2 header */
+static void _load_backup_segments(struct luks2_hdr *hdr,
+		struct luks2_reenc_context *rh)
+{
+	int segment = LUKS2_get_segment_id_by_flag(hdr, "reencrypt-final");
+
+	if (segment >= 0) {
+		rh->jobj_segment_new = json_object_get(LUKS2_get_segment_jobj(hdr, segment));
+		rh->digest_new = LUKS2_digest_by_segment(NULL, hdr, segment);
+	} else {
+		rh->jobj_segment_new = NULL;
+		rh->digest_new = -ENOENT;
+	}
+
+	segment = LUKS2_get_segment_id_by_flag(hdr, "reencrypt-previous");
+	if (segment >= 0) {
+		rh->jobj_segment_old = json_object_get(LUKS2_get_segment_jobj(hdr, segment));
+		rh->digest_old = LUKS2_digest_by_segment(NULL, hdr, segment);
+	} else {
+		rh->jobj_segment_old = NULL;
+		rh->digest_old = -ENOENT;
+	}
 }
 
 /* this code expects valid LUKS2 header */
@@ -216,6 +247,13 @@ static int _reenc_load(struct crypt_device *cd,
 	}
 	rh->offset <<= SECTOR_SHIFT;
 
+	_load_backup_segments(hdr, rh);
+
+	log_dbg("reencrypt-previous digest id: %d", rh->digest_old);
+	log_dbg("reencrypt-previous segment: %s", rh->jobj_segment_old ? json_object_to_json_string_ext(rh->jobj_segment_old, JSON_C_TO_STRING_PRETTY) : "<missing>");
+	log_dbg("reencrypt-final digest id: %d", rh->digest_new);
+	log_dbg("reencrypt-final segment: %s", rh->jobj_segment_new ? json_object_to_json_string_ext(rh->jobj_segment_new, JSON_C_TO_STRING_PRETTY) : "<missing>");
+
 	log_dbg("reencrypt length: %" PRIu64, rh->length);
 	log_dbg("reencrypt offset: %" PRIu64, rh->offset);
 	log_dbg("reencrypt shift: %" PRIi64, rh->data_shift);
@@ -262,10 +300,10 @@ int LUKS2_reenc_recover(struct crypt_device *cd,
 	if (rseg < 0)
 		return -EINVAL;
 
-	vk_new = crypt_volume_key_by_digest(vks, LUKS2_reencrypt_digest_new(hdr));
+	vk_new = crypt_volume_key_by_digest(vks, rh->digest_new);
 	if (!vk_new && rh->type != DECRYPT)
 		return-EINVAL;
-	vk_old = crypt_volume_key_by_digest(vks, LUKS2_reencrypt_digest_old(hdr));
+	vk_old = crypt_volume_key_by_digest(vks, rh->digest_old);
 	if (!vk_old && rh->type != ENCRYPT)
 		return-EINVAL;
 	old_sector_size = json_segment_get_sector_size(LUKS2_reencrypt_segment_old(hdr));
@@ -459,6 +497,141 @@ out:
 	return r;
 }
 
+static int _add_backup_segment(struct crypt_device *cd,
+		struct luks2_hdr *hdr,
+		struct luks2_reenc_context *rh,
+		unsigned final)
+{
+	int digest, s = LUKS2_segment_first_unused_id(hdr);
+	json_object *jobj;
+
+	if (s < 0)
+		return s;
+
+	digest = final ? rh->digest_new : rh->digest_old;
+	jobj = final ? rh->jobj_segment_new : rh->jobj_segment_old;
+
+	if (json_object_object_add_by_uint(LUKS2_get_segments_jobj(hdr), s, json_object_get(jobj))) {
+		json_object_put(jobj);
+		return -EINVAL;
+	}
+
+	return LUKS2_digest_segment_assign(cd, hdr, s, digest, 1, 0);
+}
+
+static int _assign_segments_simple(struct crypt_device *cd,
+	struct luks2_hdr *hdr,
+	struct luks2_reenc_context *rh,
+	unsigned pre,
+	unsigned commit)
+{
+	int r, sg;
+
+	if (pre && json_segments_count(rh->jobj_segs_pre) > 0) {
+		log_dbg("Setting 'pre' segments.");
+
+		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_pre, 0);
+		if (!r)
+			rh->jobj_segs_pre = NULL;
+	} else if (!pre && json_segments_count(rh->jobj_segs_after) > 0) {
+		log_dbg("Setting 'after' segments.");
+		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_after, 0);
+		if (!r)
+			rh->jobj_segs_after = NULL;
+	}
+
+	if (r) {
+		log_err(cd, "Failed to assign new enc segments.");
+		return r;
+	}
+
+	r = _add_backup_segment(cd, hdr, rh, rh->type == ENCRYPT);
+	if (r) {
+		log_dbg("Failed to assign reencryption final backup segment.");
+		return r;
+	}
+
+	for (sg = 0; sg < LUKS2_segments_count(hdr); sg++) {
+		if (LUKS2_segment_is_type(hdr, sg, "crypt") &&
+		    LUKS2_digest_segment_assign(cd, hdr, sg, rh->type == ENCRYPT ? rh->digest_new : rh->digest_old, 1, 0)) {
+			log_err(cd, "Failed to assign digest %u to segment %u.", rh->digest_new, sg);
+			return -EINVAL;
+		}
+	}
+
+	return commit ? LUKS2_hdr_write(cd, hdr) : 0;
+}
+
+/* FIXME: this is stupid. Rewrite */
+static int reenc_assign_segments(struct crypt_device *cd, struct luks2_hdr *hdr, struct luks2_reenc_context *rh, unsigned pre, unsigned commit)
+{
+	int r, rseg, scount;
+
+	/* FIXME: validate in reencrypt context load */
+	if (rh->digest_new < 0 && rh->type != DECRYPT)
+		return -EINVAL;
+
+	if (LUKS2_digest_segment_assign(cd, hdr, CRYPT_ANY_SEGMENT, CRYPT_ANY_DIGEST, 0, 0))
+		return -EINVAL;
+
+	if (rh->type == ENCRYPT || rh->type == DECRYPT)
+		return _assign_segments_simple(cd, hdr, rh, pre, commit);
+
+	if (pre && rh->jobj_segs_pre) {
+		log_dbg("Setting 'pre' segments.");
+
+		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_pre, 0);
+		if (!r)
+			rh->jobj_segs_pre = NULL;
+	} else if (rh->jobj_segs_after) {
+		log_dbg("Setting 'after' segments.");
+		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_after, 0);
+		if (!r)
+			rh->jobj_segs_after = NULL;
+	}
+
+	scount = LUKS2_segments_count(hdr);
+
+	/* segment in reencryption has to hold reference on both digests */
+	rseg = json_segments_segment_in_reencrypt(LUKS2_get_segments_jobj(hdr));
+	if (rseg < 0 && pre)
+		return -EINVAL;
+
+	if (rseg >= 0) {
+		LUKS2_digest_segment_assign(cd, hdr, rseg, rh->digest_new, 1, 0);
+		LUKS2_digest_segment_assign(cd, hdr, rseg, rh->digest_old, 1, 0);
+	}
+
+	if (pre) {
+		if (rseg > 0)
+			LUKS2_digest_segment_assign(cd, hdr, 0, rh->digest_new, 1, 0);
+		if (scount > rseg + 1)
+			LUKS2_digest_segment_assign(cd, hdr, rseg + 1, rh->digest_old, 1, 0);
+	} else {
+		LUKS2_digest_segment_assign(cd, hdr, 0, rh->digest_new, 1, 0);
+		if (scount > 1)
+			LUKS2_digest_segment_assign(cd, hdr, 1, rh->digest_old, 1, 0);
+	}
+
+	if (r) {
+		log_err(cd, "Failed to set segments.\n");
+		return r;
+	}
+
+	r = _add_backup_segment(cd, hdr, rh, 0);
+	if (r) {
+		log_err(cd, "Failed to assign reencrypt previous backup segment.");
+		return r;
+	}
+	r = _add_backup_segment(cd, hdr, rh, 1);
+	if (r) {
+		log_err(cd, "Failed to assign reencrypt final backup segment.");
+		return r;
+	}
+
+	return commit ? LUKS2_hdr_write(cd, hdr) : 0;
+}
+
 int LUKS2_reenc_update_segments(struct crypt_device *cd,
 		struct luks2_hdr *hdr,
 		struct luks2_reenc_context *rh)
@@ -469,8 +642,10 @@ int LUKS2_reenc_update_segments(struct crypt_device *cd,
 /* FIXME: seems to be temporary and for encryption initialization only */
 static int _encrypt_set_segments(struct crypt_device *cd, struct luks2_hdr *hdr, int64_t data_shift)
 {
-	uint64_t first_segment_offset, dev_size, first_segment_length, second_segment_offset, second_segment_length;
-	int r; //, digest_new;
+	int r;
+	uint64_t first_segment_offset, dev_size, first_segment_length,
+		 second_segment_offset, second_segment_length,
+		 data_offset = LUKS2_get_data_offset(hdr) << SECTOR_SHIFT;
 	json_object *jobj_segment_first = NULL, *jobj_segment_second = NULL, *jobj_segments;
 
 	if ((r = device_size(crypt_data_device(cd), &dev_size))) {
@@ -483,17 +658,15 @@ static int _encrypt_set_segments(struct crypt_device *cd, struct luks2_hdr *hdr,
 
 	if (data_shift) {
 		/* future data_device layout: [future LUKS2 header][second data segment][empty space][first data segment] */
-		first_segment_offset = dev_size - (LUKS2_get_data_offset(hdr) << SECTOR_SHIFT);
-		first_segment_length = LUKS2_get_data_offset(hdr) << SECTOR_SHIFT;
-		second_segment_offset = LUKS2_get_data_offset(hdr) << SECTOR_SHIFT;
-		second_segment_length = dev_size - 2*(LUKS2_get_data_offset(hdr) << SECTOR_SHIFT) + (data_shift < 0 ? data_shift : -data_shift);
+		first_segment_offset = dev_size - data_offset;
+		first_segment_length = data_offset;
+		second_segment_offset = data_offset;
+		second_segment_length = dev_size - 2 * data_offset + (data_shift < 0 ? data_shift : -data_shift);
 	} else {
 		/* future data_device layout with deatached header: [first data segment] */
 		first_segment_offset = 0;
 		first_segment_length = 0; /* dynamic */
 	}
-
-	//digest_new = LUKS2_reencrypt_digest_new(hdr);
 
 	jobj_segments = json_object_new_object();
 	if (!jobj_segments)
@@ -519,11 +692,7 @@ static int _encrypt_set_segments(struct crypt_device *cd, struct luks2_hdr *hdr,
 	if (jobj_segment_second)
 		json_object_object_add(jobj_segments, "1", jobj_segment_second);
 
-	/* TODO missing CRYPT_ANY_SEGMENT in setup.c */
-	LUKS2_digest_segment_assign(cd, hdr, 0, CRYPT_ANY_DIGEST, 0, 0);
-	LUKS2_digest_segment_assign(cd, hdr, 1, CRYPT_ANY_DIGEST, 0, 0);
-	LUKS2_digest_segment_assign(cd, hdr, 2, CRYPT_ANY_DIGEST, 0, 0);
-	LUKS2_digest_segment_assign(cd, hdr, 3, CRYPT_ANY_DIGEST, 0, 0);
+	LUKS2_digest_segment_assign(cd, hdr, CRYPT_ANY_SEGMENT, CRYPT_ANY_DIGEST, 0, 0);
 
 	r = LUKS2_segments_set(cd, hdr, jobj_segments, 1);
 err:
@@ -833,107 +1002,6 @@ err:
 	return r;
 }
 
-static int enc_assign_segments(struct crypt_device *cd,
-	struct luks2_hdr *hdr,
-	struct luks2_reenc_context *rh,
-	int digest_new,
-	unsigned pre,
-	int commit)
-{
-	int r, sg;
-
-	if (pre && json_segments_count(rh->jobj_segs_pre) > 0) {
-		log_dbg("Setting 'pre' segments.");
-
-		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_pre, 0);
-		if (!r)
-			rh->jobj_segs_pre = NULL;
-	} else if (!pre && json_segments_count(rh->jobj_segs_after) > 0) {
-		log_dbg("Setting 'after' segments.");
-		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_after, 0);
-		if (!r)
-			rh->jobj_segs_after = NULL;
-	}
-
-	if (r) {
-		log_err(cd, "Failed to assign new enc segments.");
-		return r;
-	}
-
-	for (sg = 0; sg < LUKS2_segments_count(hdr); sg++) {
-		if (LUKS2_segment_is_type(hdr, sg, "crypt") &&
-		    LUKS2_digest_segment_assign(cd, hdr, sg, digest_new, 1, 0)) {
-			log_err(cd, "Failed to assign digest %u to segment %u.", digest_new, sg);
-			return -EINVAL;
-		}
-	}
-
-	return commit ? LUKS2_hdr_write(cd, hdr) : 0;
-}
-
-/* FIXME: this is stupid. Rewrite */
-int reenc_assign_segments(struct crypt_device *cd, struct luks2_hdr *hdr, struct luks2_reenc_context *rh, unsigned pre, int commit)
-{
-	int r, rseg, scount,
-	    digest_old = LUKS2_reencrypt_digest_old(hdr),
-	    digest_new = LUKS2_reencrypt_digest_new(hdr);
-
-	if (digest_new < 0 && rh->type != DECRYPT)
-		return -EINVAL;
-
-	/* TODO: crypt_any_segment */
-	LUKS2_digest_segment_assign(cd, hdr, 0, CRYPT_ANY_DIGEST, 0, 0);
-	LUKS2_digest_segment_assign(cd, hdr, 1, CRYPT_ANY_DIGEST, 0, 0);
-	LUKS2_digest_segment_assign(cd, hdr, 2, CRYPT_ANY_DIGEST, 0, 0);
-	LUKS2_digest_segment_assign(cd, hdr, 3, CRYPT_ANY_DIGEST, 0, 0);
-
-	if (rh->type == ENCRYPT || rh->type == DECRYPT)
-		return enc_assign_segments(cd, hdr, rh, rh->type == ENCRYPT ? digest_new : digest_old, pre, commit);
-
-	if (pre && rh->jobj_segs_pre) {
-		log_dbg("Setting 'pre' segments.");
-
-		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_pre, 0);
-		if (!r)
-			rh->jobj_segs_pre = NULL;
-	} else if (rh->jobj_segs_after) {
-		log_dbg("Setting 'after' segments.");
-		r = LUKS2_segments_set(cd, hdr, rh->jobj_segs_after, 0);
-		if (!r)
-			rh->jobj_segs_after = NULL;
-	}
-
-	scount = LUKS2_segments_count(hdr);
-
-	/* segment in reencryption has to hold reference on both digests */
-	rseg = json_segments_segment_in_reencrypt(LUKS2_get_segments_jobj(hdr));
-	if (rseg < 0 && pre)
-		return -EINVAL;
-
-	if (rseg >= 0) {
-		LUKS2_digest_segment_assign(cd, hdr, rseg, digest_new, 1, 0);
-		LUKS2_digest_segment_assign(cd, hdr, rseg, digest_old, 1, 0);
-	}
-
-	if (pre) {
-		if (rseg > 0)
-			LUKS2_digest_segment_assign(cd, hdr, 0, digest_new, 1, 0);
-		if (scount > rseg + 1)
-			LUKS2_digest_segment_assign(cd, hdr, rseg + 1, digest_old, 1, 0);
-	} else {
-		LUKS2_digest_segment_assign(cd, hdr, 0, digest_new, 1, 0);
-		if (scount > 1)
-			LUKS2_digest_segment_assign(cd, hdr, 1, digest_old, 1, 0);
-	}
-
-	if (r) {
-		log_err(cd, "Failed to set segments.\n");
-		return r;
-	}
-
-	return commit ? LUKS2_hdr_write(cd, hdr) : 0;
-}
-
 static int reenc_init_helper_devices(struct crypt_device *cd,
 				     const char *name,
 				     const char *hotzone,
@@ -1108,6 +1176,62 @@ int update_reencryption_flag(struct crypt_device *cd, int enable)
 	return LUKS2_config_set_requirements(cd, hdr, reqs);
 }
 
+static int _create_backup_segments(struct crypt_device *cd,
+		struct luks2_hdr *hdr,
+		int keyslot_new,
+		const char *reenc_mode,
+		const char *cipher,
+		const struct crypt_params_luks2 *params)
+{
+	int r, segment, digest_old = -1, digest_new = -1;
+	json_object *jobj_segment_new = NULL, *jobj_segment_old = NULL;
+	uint32_t sector_size = params ? params->sector_size : SECTOR_SIZE;
+
+	if (strcmp(reenc_mode, "decrypt")) {
+		digest_new = LUKS2_digest_by_keyslot(cd, hdr, keyslot_new);
+		if (digest_new < 0)
+			return -EINVAL;
+	}
+
+	if (strcmp(reenc_mode, "encrypt")) {
+		digest_old = LUKS2_digest_by_segment(cd, hdr, CRYPT_DEFAULT_SEGMENT);
+		if (digest_old < 0)
+			return -EINVAL;
+	}
+
+	segment = LUKS2_segment_first_unused_id(hdr);
+	if (segment < 0)
+		return -EINVAL;
+
+	/* FIXME: Add detection for case (digest old == digest new && old segment == new segment) */
+	if (digest_old >= 0) {
+		json_object_copy(LUKS2_get_segment_jobj(hdr, CRYPT_DEFAULT_SEGMENT), &jobj_segment_old);
+		r = LUKS2_segment_set_flag(jobj_segment_old, "reencrypt-previous");
+		if (r)
+			goto err;
+		json_object_object_add_by_uint(LUKS2_get_segments_jobj(hdr), segment, jobj_segment_old);
+		LUKS2_digest_segment_assign(cd, hdr, segment++, digest_old, 1, 0);
+	}
+
+	if (digest_new >= 0) {
+		jobj_segment_new = LUKS2_segment_create_crypt(
+							crypt_get_data_offset(cd) * SECTOR_SIZE,
+							crypt_get_iv_offset(cd),
+							NULL, cipher, sector_size, 0);
+		r = LUKS2_segment_set_flag(jobj_segment_new, "reencrypt-final");
+		if (r)
+			goto err;
+		json_object_object_add_by_uint(LUKS2_get_segments_jobj(hdr), segment, jobj_segment_new);
+		LUKS2_digest_segment_assign(cd, hdr, segment, digest_new, 1, 0);
+	}
+
+	return LUKS2_hdr_write(cd, hdr);
+err:
+	json_object_put(jobj_segment_new);
+	json_object_put(jobj_segment_old);
+	return r;
+}
+
 /* only for reencryption or encryption initialization. Create reencrypt keyslot describing the operation */
 /* it's basically special type of crypt_format */
 int crypt_reencrypt_init(struct crypt_device *cd,
@@ -1119,7 +1243,7 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 	struct crypt_params_luks2 *params) /* NULL if not changed */
 {
 	char _cipher[128];
-	int devfd, digest, r, reencrypt_keyslot;
+	int devfd, r, reencrypt_keyslot;
 	luks2_reencrypt_info ri;
 	struct luks2_hdr *hdr;
 
@@ -1148,15 +1272,6 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 		snprintf(_cipher, sizeof(_cipher), "%s-%s", cipher, cipher_mode);
 
 	hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
-
-	/* find digest of new VK */
-	/* FIXME: What about decryption ?*/
-	if (new_keyslot == CRYPT_ANY_SLOT)
-		new_keyslot = LUKS2_find_keyslot_for_segment(cd, hdr, CRYPT_DEFAULT_SEGMENT, "luks2");
-
-	digest = LUKS2_digest_by_keyslot(cd, hdr, new_keyslot);
-	if (digest < 0)
-		return -EINVAL;
 
 	reencrypt_keyslot = LUKS2_keyslot_find_empty(hdr, NULL);
 	if (reencrypt_keyslot < 0) {
@@ -1202,14 +1317,21 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 	/* </atomic_operation> */
 
 	r = LUKS2_keyslot_reencrypt_create(cd, hdr, reencrypt_keyslot,
-					   reencrypt_mode, digest, _cipher, data_shift, params);
+					   reencrypt_mode, data_shift);
 	if (r < 0)
 		goto err;
 	reencrypt_keyslot = r;
+
 	if (!strcmp(reencrypt_mode, "encrypt")) {
 		r = _encrypt_set_segments(cd, hdr, data_shift);
 		if (r)
 			goto err;
+	}
+
+	r = _create_backup_segments(cd, hdr, new_keyslot, reencrypt_mode, _cipher, params);
+	if (r) {
+		log_err(cd, _("Failed to create reencrypt backup segments."));
+		goto err;
 	}
 
 	if (data_shift && move_data(cd, devfd, data_shift)) {
@@ -1222,6 +1344,7 @@ err:
 	if (r < 0) {
 		crypt_keyslot_destroy(cd, reencrypt_keyslot);
 		update_reencryption_flag(cd, 0);
+		/* TODO: remove backup segments */
 	}
 	if (devfd >= 0)
 		close(devfd);
@@ -1483,6 +1606,13 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 	}
 	rh->offset <<= SECTOR_SHIFT;
 
+	_load_backup_segments(hdr, rh);
+
+	log_dbg("reencrypt-previous digest id: %d", rh->digest_old);
+	log_dbg("reencrypt-previous segment: %s", rh->jobj_segment_old ? json_object_to_json_string_ext(rh->jobj_segment_old, JSON_C_TO_STRING_PRETTY) : "<missing>");
+	log_dbg("reencrypt-final digest id: %d", rh->digest_new);
+	log_dbg("reencrypt-final segment: %s", rh->jobj_segment_new ? json_object_to_json_string_ext(rh->jobj_segment_new, JSON_C_TO_STRING_PRETTY) : "<missing>");
+
 	log_dbg("reencrypt length: %" PRIu64, rh->length);
 	log_dbg("reencrypt offset: %" PRIu64, rh->offset);
 	log_dbg("reencrypt shift: %" PRIi64, rh->data_shift);
@@ -1506,7 +1636,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 	char hotzone[128], overlay[128];
 	char *reenc_buffer;
 	ssize_t read;
-	int i, digest_old, r;
+	int i, r;
 	luks2_reencrypt_info ri;
 	struct luks2_hdr *hdr;
 	struct volume_key *vks[4] = {};
@@ -1580,7 +1710,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 			return r;
 	}
 
-	vk = crypt_volume_key_by_digest(vks, LUKS2_reencrypt_digest_old(hdr));
+	vk = crypt_volume_key_by_digest(vks, rh.digest_old);
 	r = crypt_storage_wrapper_init(cd, &cw1, crypt_data_device(cd),
 			(crypt_get_data_offset(cd) << SECTOR_SHIFT),
 			crypt_get_iv_offset(cd),
@@ -1592,7 +1722,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 		goto err;
 	}
 
-	vk = crypt_volume_key_by_digest(vks, LUKS2_reencrypt_digest_new(hdr));
+	vk = crypt_volume_key_by_digest(vks, rh.digest_new);
 	r = crypt_storage_wrapper_init(cd, &cw2, crypt_data_device(cd),
 			(crypt_get_data_offset(cd) << SECTOR_SHIFT),
 			crypt_get_iv_offset(cd),
@@ -1802,14 +1932,15 @@ err:
 	}
 
 	if (!r) {
-		digest_old = LUKS2_reencrypt_digest_old(hdr);
-		if (digest_old >= 0)
+		if (rh.digest_old >= 0)
 			for (i = 0; i < LUKS2_KEYSLOTS_MAX; i++)
-				if (LUKS2_digest_by_keyslot(NULL, hdr, i) == digest_old)
+				if (LUKS2_digest_by_keyslot(NULL, hdr, i) == rh.digest_old)
 					crypt_keyslot_destroy(cd, i);
 		crypt_keyslot_destroy(cd, rh.reenc_keyslot);
+		if (reenc_erase_backup_segments(cd, hdr))
+			log_err(cd, "Failed to erase backup segments");
 		if (update_reencryption_flag(cd, 0))
-			log_err(cd, "Failed to disable reencryption requirement flag.\n");
+			log_err(cd, "Failed to disable reencryption requirement flag.");
 	}
 
 	if (online) {
@@ -1828,4 +1959,23 @@ err:
 	free(reenc_buffer);
 
 	return r;
+}
+
+int reenc_erase_backup_segments(struct crypt_device *cd,
+		struct luks2_hdr *hdr)
+{
+	int segment = LUKS2_get_segment_id_by_flag(hdr, "reencrypt-previous");
+	if (segment >= 0) {
+		if (LUKS2_digest_segment_assign(cd, hdr, segment, CRYPT_ANY_DIGEST, 0, 0))
+			return -EINVAL;
+		json_object_object_del_by_uint(LUKS2_get_segments_jobj(hdr), segment);
+	}
+	segment = LUKS2_get_segment_id_by_flag(hdr, "reencrypt-final");
+	if (segment >= 0) {
+		if (LUKS2_digest_segment_assign(cd, hdr, segment, CRYPT_ANY_DIGEST, 0, 0))
+			return -EINVAL;
+		json_object_object_del_by_uint(LUKS2_get_segments_jobj(hdr), segment);
+	}
+
+	return 0;
 }

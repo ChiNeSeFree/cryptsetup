@@ -61,8 +61,5 @@ int reenc_swap_backing_device(struct crypt_device *cd, const char *name, const c
 
 int reenc_activate_hotzone_device(struct crypt_device *cd, const char *name, uint32_t flags);
 
-int reenc_device_segments(struct crypt_device *cd, struct luks2_hdr *hdr, struct luks2_reenc_context *rh, uint64_t *size);
-
-int reenc_assign_segments(struct crypt_device *cd, struct luks2_hdr *hdr, struct luks2_reenc_context *rh, unsigned pre, int commit);
-
+int reenc_erase_backup_segments(struct crypt_device *cd, struct luks2_hdr *hdr);
 #endif /* _UTILS_REENCRYPT_H */

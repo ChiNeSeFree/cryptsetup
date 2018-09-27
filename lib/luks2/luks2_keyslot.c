@@ -541,14 +541,10 @@ int LUKS2_keyslot_reencrypt_create(struct crypt_device *cd,
 	struct luks2_hdr *hdr,
 	int keyslot,
 	const char *reencrypt_mode,
-	int digest, /* digest of new segment key (may be same as old one) */
-	const char *cipher,
-	int64_t data_shift,
-	struct crypt_params_luks2 *params)
+	int64_t data_shift)
 {
 	const keyslot_handler *h;
 	int r;
-	uint32_t sector_size = params ? params->sector_size : crypt_get_sector_size(cd);
 
 	if (keyslot == CRYPT_ANY_SLOT)
 		return -EINVAL;
@@ -559,7 +555,7 @@ int LUKS2_keyslot_reencrypt_create(struct crypt_device *cd,
 		return -EINVAL;
 
 	/* doesn't fit alloc prototype (TODO: different keyslot for encryption and reencryption?) */
-	r = reenc_keyslot_alloc(cd, hdr, keyslot, reencrypt_mode, digest, cipher, sector_size, data_shift);
+	r = reenc_keyslot_alloc(cd, hdr, keyslot, reencrypt_mode, data_shift);
 	if (r < 0)
 		return r;
 
