@@ -257,7 +257,7 @@ static int action_encrypt(const char *device)
 	};
 
 	/* Twice default LUKS2 header size */
-	if (opt_reduce_size < (8 * 1024 * 1024)) {
+	if (opt_reduce_size < (8 * 1024 * 1024) && !opt_header_device) {
 		log_err(_("Minimal reduce size is 8 MiBs (%d sectors)"), 8 * 1024 * 2);
 		return -EINVAL;
 	}
