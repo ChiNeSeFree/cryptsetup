@@ -388,6 +388,8 @@ json_object *LUKS2_get_segment_by_flag(struct luks2_hdr *hdr, const char *flag);
 
 json_object *json_segments_get_segment_by_flag(json_object *jobj_segments, const char *flag);
 
+void json_segment_remove_flag(json_object *jobj_segment, const char *flag);
+
 int LUKS2_get_segment_id_by_flag(struct luks2_hdr *hdr, const char *flag);
 
 int LUKS2_segment_ignore(json_object *jobj_segment);

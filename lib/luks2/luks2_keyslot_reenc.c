@@ -381,7 +381,7 @@ static json_object *_enc_create_segments_shift_after(struct crypt_device *cd,
 	if (json_object_copy(json_segments_get_segment(rh->jobj_segs_pre, reenc_seg + 1), &jobj_seg_new)) {
 		if (json_object_copy(json_segments_get_segment(rh->jobj_segs_pre, reenc_seg), &jobj_seg_new))
 			goto err;
-		json_object_object_del(jobj_seg_new, "reencryption");
+		json_segment_remove_flag(jobj_seg_new, "in-reencryption");
 		tmp = rh->length;
 	} else {
 		json_object_object_add(jobj_seg_new, "offset", json_object_new_uint64(rh->offset + data_offset));

@@ -158,11 +158,11 @@ uint64_t LUKS2_segment_offset(struct luks2_hdr *hdr, int segment, unsigned block
 
 int json_segments_segment_in_reencrypt(json_object *jobj_segments)
 {
-	json_object *jobj;
+	json_object *jobj_flags;
 
 	json_object_object_foreach(jobj_segments, slot, val) {
-		if (!json_object_object_get_ex(val, "reencryption", &jobj) ||
-		    strcmp("in-progress", json_object_get_string(jobj)))
+		if (!json_object_object_get_ex(val, "flags", &jobj_flags) ||
+		    !LUKS2_array_jobj(jobj_flags, "in-reencryption"))
 			continue;
 
 		return atoi(slot);
@@ -248,12 +248,6 @@ int LUKS2_segment_first_unused_id(struct luks2_hdr *hdr)
 	return last_id + 1;
 }
 
-static void _add_reencryption_field(json_object *jobj)
-{
-	if (jobj)
-		json_object_object_add(jobj, "reencryption", json_object_new_string("in-progress"));
-}
-
 static json_object *_segment_create_generic(const char *type, uint64_t offset, uint64_t *length)
 {
 	json_object *jobj = json_object_new_object();
@@ -271,7 +265,7 @@ json_object *LUKS2_segment_create_linear(uint64_t offset, uint64_t *length, unsi
 {
 	json_object *jobj = _segment_create_generic("linear", offset, length);
 	if (reencryption)
-		_add_reencryption_field(jobj);
+		LUKS2_segment_set_flag(jobj, "in-reencryption");
 	return jobj;
 }
 
@@ -288,7 +282,7 @@ json_object *LUKS2_segment_create_crypt(uint64_t offset,
 	json_object_object_add(jobj, "encryption",	json_object_new_string(cipher));
 	json_object_object_add(jobj, "sector_size",	json_object_new_int(sector_size));
 	if (reencryption)
-		_add_reencryption_field(jobj);
+		LUKS2_segment_set_flag(jobj, "in-reencryption");
 
 	return jobj;
 }
@@ -408,4 +402,25 @@ json_object *json_segments_get_segment_by_flag(json_object *jobj_segments, const
 		_get_segment_or_id_by_flag(jobj_segments, flag, 0, &jobj_segment);
 
 	return jobj_segment;
+}
+
+void json_segment_remove_flag(json_object *jobj_segment, const char *flag)
+{
+	json_object *jobj_flags, *jobj_flags_new;
+
+	if (!jobj_segment)
+		return;
+
+	if (!json_object_object_get_ex(jobj_segment, "flags", &jobj_flags))
+		return;
+
+	jobj_flags_new = LUKS2_array_remove(jobj_flags, flag);
+	if (!jobj_flags_new)
+		return;
+
+	if (json_object_array_length(jobj_flags_new) <= 0) {
+		json_object_put(jobj_flags_new);
+		json_object_object_del(jobj_segment, "flags");
+	} else
+		json_object_object_add(jobj_segment, "flags", jobj_flags_new);
 }
