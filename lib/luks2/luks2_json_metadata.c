@@ -1919,24 +1919,21 @@ int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_
 	}
 }
 
-uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_context *rh)
+/* TODO: drop this. it's ugly */
+uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_context *rh, uint64_t length)
 {
 	int reenc_seg;
 	int64_t tmp;
-	uint64_t dummy, length;
 
-	/* if we crashed return directly the crash length */
+	/* if reencryption crashed return directly the crash length */
 	reenc_seg = json_segments_segment_in_reencrypt(LUKS2_get_segments_jobj(hdr));
 	if (reenc_seg >= 0)
 		return LUKS2_segment_size(hdr, reenc_seg, 0);
 
-	if (LUKS2_keyslot_area(hdr, rh->reenc_keyslot, &dummy, &length) < 0)
-		return 0;
-
 	if (rh->rp.type == REENC_PROTECTION_NOOP)
 		length = rh->rp.p.noop.hz_size ?: LUKS2_DEFAULT_REENCRYPTION_LENGTH;
 	else if (rh->rp.type == REENC_PROTECTION_CHECKSUM)
-		length = (length / rh->rp.p.csum.hash_size) * rh->alignment;
+		length = (length / rh->rp.p.csum.hash_size - 1) * rh->alignment;
 	else if (rh->rp.type == REENC_PROTECTION_DATASHIFT) {
 		tmp = LUKS2_reencrypt_data_shift(hdr);
 		length = (uint64_t) (tmp < 0 ? -tmp : tmp);

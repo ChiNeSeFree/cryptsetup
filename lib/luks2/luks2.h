@@ -132,9 +132,13 @@ struct reenc_protection {
 		uint64_t hz_size;
 	} noop;
 	struct {
-		size_t hash_size;
 		char hash[LUKS2_CHECKSUM_ALG_L]; // or include luks.h
 		struct crypt_hash *ch;
+		size_t hash_size;
+		/* buffer for checksums */
+		void *checksums;
+		void *last_checksum;
+		size_t checksums_len;
 	} csum;
 	struct {
 		uint64_t hz_size;
@@ -158,10 +162,6 @@ struct luks2_reenc_context {
 	struct reenc_protection rp;
 
 	int reenc_keyslot;
-
-	/* checksums in-memory storage */
-	char *buffer;
-	size_t buffer_len;
 
 	/* already running reencryption */
 	json_object *jobj_segs_pre;
@@ -534,7 +534,7 @@ int LUKS2_wipe_header_areas(struct crypt_device *cd,
 
 uint64_t LUKS2_get_data_offset(struct luks2_hdr *hdr);
 int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_size, uint64_t reencrypt_length, uint64_t *offset);
-uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_context *rh);
+uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_context *rh, uint64_t length);
 int LUKS2_get_sector_size(struct luks2_hdr *hdr);
 const char *LUKS2_get_cipher(struct luks2_hdr *hdr, int segment);
 const char *LUKS2_get_integrity(struct luks2_hdr *hdr, int segment);

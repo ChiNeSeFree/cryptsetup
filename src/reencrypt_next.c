@@ -158,6 +158,8 @@ static int action_reencrypt_next(const char *device)
 		goto err;
 
 	r = crypt_reencrypt_init(cd, new_ks, "reencrypt", pc, pcm, 0, &luks2_params);
+	if (r < 0)
+		goto err;
 
 	/* this simulates split between initialising a reencryption and actually running reencryption */
 	crypt_free(cd);
