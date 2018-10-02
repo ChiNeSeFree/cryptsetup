@@ -88,7 +88,7 @@ static int set_pbkdf_params(struct crypt_device *cd, const char *dev_type)
 static int action_reencrypt_next(const char *device)
 {
 	uint32_t flags;
-	char *pc = NULL, *pcm = NULL, cipher [MAX_CIPHER_LEN], cipher_mode[MAX_CIPHER_LEN];
+	char cipher [MAX_CIPHER_LEN], mode[MAX_CIPHER_LEN];
 	int old_ks, new_ks;
 	size_t passwordLen;
 	char *password = NULL;
@@ -97,14 +97,11 @@ static int action_reencrypt_next(const char *device)
 	struct crypt_params_reencrypt reenc_params = {};
 	struct crypt_params_luks2 luks2_params = {};
 
-	if (opt_cipher) {
-		r = crypt_parse_name_and_mode(opt_cipher, cipher, NULL, cipher_mode);
-		if (r < 0) {
-			log_err(_("No known cipher specification pattern detected.\n"));
-			goto err;
-		}
-		pc = cipher;
-		pcm = cipher_mode;
+	r = crypt_parse_name_and_mode(opt_cipher ?: DEFAULT_CIPHER(LUKS1),
+				      cipher, NULL, mode);
+	if (r < 0) {
+		log_err(_("No known cipher specification pattern detected.\n"));
+		goto err;
 	}
 
 	if (crypt_init(&cd, opt_header_device ?: device) ||
@@ -157,7 +154,7 @@ static int action_reencrypt_next(const char *device)
 	if (r != new_ks)
 		goto err;
 
-	r = crypt_reencrypt_init(cd, new_ks, "reencrypt", pc, pcm, 0, &luks2_params);
+	r = crypt_reencrypt_init(cd, new_ks, "reencrypt", cipher, mode, 0, &luks2_params);
 	if (r < 0)
 		goto err;
 
@@ -329,7 +326,7 @@ static int action_encrypt(const char *device)
 		data_shift = 0;
 
 	log_dbg("data_shift in cli: %" PRIi64, data_shift);
-	r = crypt_reencrypt_init(cd, keyslot, "encrypt", NULL, NULL, data_shift, NULL);
+	r = crypt_reencrypt_init(cd, keyslot, "encrypt", cipher, cipher_mode, data_shift, NULL);
 	if (r < 0) {
 		log_err("reencrypt init failed.");
 		goto err;
@@ -378,7 +375,6 @@ err:
 static int action_decrypt(const char *device)
 {
 	size_t passwordLen;
-	int64_t data_shift;
 	int keyslot, r, fd = -1, devfd = -1;
 	struct crypt_device *cd = NULL;
 	char *password = NULL;
@@ -407,13 +403,7 @@ static int action_decrypt(const char *device)
 	}
 	keyslot = r;
 
-	if (!opt_header_device) {
-		data_shift = 1;
-	} else
-		data_shift = 0;
-
-	log_dbg("data_shift in cli: %" PRIi64, data_shift);
-	r = crypt_reencrypt_init(cd, CRYPT_ANY_SLOT, "decrypt", NULL, NULL, data_shift, NULL);
+	r = crypt_reencrypt_init(cd, CRYPT_ANY_SLOT, "decrypt", NULL, NULL, 0, NULL);
 	if (r < 0) {
 		log_err("reencrypt init failed.");
 		goto err;

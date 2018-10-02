@@ -1252,6 +1252,12 @@ err:
 	return r;
 }
 
+static int parse_reencryption_mode(const char *mode)
+{
+	return (!mode ||
+		(strcmp(mode, "reencrypt") && strcmp(mode, "encrypt") && strcmp(mode, "decrypt")));
+}
+
 /* only for reencryption or encryption initialization. Create reencrypt keyslot describing the operation */
 /* it's basically special type of crypt_format */
 int crypt_reencrypt_init(struct crypt_device *cd,
@@ -1267,24 +1273,11 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 	luks2_reencrypt_info ri;
 	struct luks2_hdr *hdr;
 
-	if (onlyLUKS2(cd) || !reencrypt_mode)
+	if (onlyLUKS2(cd) || parse_reencryption_mode(reencrypt_mode))
 		return -EINVAL;
 
-	if (!strcmp(reencrypt_mode, "reencrypt") && ((!cipher && cipher_mode) || new_keyslot < 0))
+	if (strcmp(reencrypt_mode, "decrypt") && (!(cipher && cipher_mode) || new_keyslot < 0))
 		return -EINVAL;
-
-	if (!strcmp(reencrypt_mode, "encrypt")) {
-		cipher = crypt_get_cipher(cd);
-		cipher_mode = crypt_get_cipher_mode(cd);
-	}
-
-	if (!strcmp(reencrypt_mode, "decrypt") && (cipher || cipher_mode || data_shift))
-		return -EINVAL;
-
-	if (!cipher && !cipher_mode) {
-		cipher = crypt_get_cipher(cd);
-		cipher_mode = crypt_get_cipher_mode(cd);
-	}
 
 	if (!cipher_mode || *cipher_mode == '\0')
 		snprintf(_cipher, sizeof(_cipher), "%s", cipher);
