@@ -144,7 +144,7 @@ static int action_reencrypt_next(const char *device)
 
 	/* FIXME: call this only if new volume key was requested */
 	new_ks = crypt_keyslot_add_by_key(cd, CRYPT_ANY_SLOT, NULL,
-			opt_key_size ? opt_key_size / 8 : crypt_get_volume_key_size(cd),
+			(opt_key_size ?: DEFAULT_LUKS1_KEYBITS) / 8,
 			password, passwordLen, CRYPT_VOLUME_KEY_NO_SEGMENT);
 	if (new_ks < 0)
 		goto err;
