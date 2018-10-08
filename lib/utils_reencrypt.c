@@ -165,7 +165,7 @@ static int _reenc_load(struct crypt_device *cd,
 {
 	const char *mode, *hash;
 	int r;
-	uint64_t dummy;
+	uint64_t dummy, area_length;
 
 	if (!rh)
 		return -EINVAL;
@@ -174,6 +174,8 @@ static int _reenc_load(struct crypt_device *cd,
 
 	rh->reenc_keyslot = LUKS2_find_keyslot(cd, hdr, "reencrypt");
 	if (rh->reenc_keyslot < 0)
+		return -EINVAL;
+	if (LUKS2_keyslot_area(hdr, rh->reenc_keyslot, &dummy, &area_length) < 0)
 		return -EINVAL;
 
 	if (!strcmp(LUKS2_reencrypt_mode(hdr), "reencrypt"))
@@ -228,9 +230,7 @@ static int _reenc_load(struct crypt_device *cd,
 			return -EINVAL;
 		}
 
-		if (LUKS2_keyslot_area(hdr, rh->reenc_keyslot, &dummy, &rh->rp.p.csum.checksums_len) < 0)
-			return -EINVAL;
-
+		rh->rp.p.csum.checksums_len = area_length;
 		rh->rp.p.csum.checksums = aligned_malloc(&rh->rp.p.csum.checksums, rh->rp.p.csum.checksums_len,
 				device_alignment(crypt_metadata_device(cd)));
 		if (!rh->rp.p.csum.checksums)
@@ -242,7 +242,7 @@ static int _reenc_load(struct crypt_device *cd,
 	} else
 		return -EINVAL;
 
-	rh->length = LUKS2_get_reencrypt_length(hdr, rh, rh->length);
+	rh->length = LUKS2_get_reencrypt_length(hdr, rh, area_length);
 	if (LUKS2_get_reencrypt_offset(hdr, rh->type, device_size, rh->length, &rh->offset)) {
 		log_err(cd, "Failed to get reencryption offset.");
 		return -EINVAL;
@@ -1591,7 +1591,7 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 		const struct crypt_params_reencrypt *params)
 {
 	int r;
-	uint64_t dummy;
+	uint64_t dummy, area_length;
 
 	if (!rh || !params)
 		return -EINVAL;
@@ -1603,6 +1603,9 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 	LUKS2_reenc_context_destroy(rh);
 
 	rh->alignment = _reenc_alignment(cd, hdr);
+
+	if (LUKS2_keyslot_area(hdr, rh->reenc_keyslot, &dummy, &area_length) < 0)
+		return -EINVAL;
 
 	if (!strcmp(params->protection, "noop")) {
 		log_dbg("Switching protection to noop.");
@@ -1632,18 +1635,14 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 			return -EINVAL;
 		}
 
-		if (LUKS2_keyslot_area(hdr, rh->reenc_keyslot, &dummy, &rh->length) < 0)
-			return -EINVAL;
-
-		rh->rp.p.csum.checksums_len = rh->length;
-
+		rh->rp.p.csum.checksums_len = area_length;
 		rh->rp.p.csum.checksums = aligned_malloc(&rh->rp.p.csum.checksums, rh->rp.p.csum.checksums_len,
 				device_alignment(crypt_metadata_device(cd)));
 		if (!rh->rp.p.csum.checksums)
 			return -ENOMEM;
 	}  else
 		return -EINVAL;
-	rh->length = LUKS2_get_reencrypt_length(hdr, rh, rh->length);
+	rh->length = LUKS2_get_reencrypt_length(hdr, rh, area_length);
 	if (LUKS2_get_reencrypt_offset(hdr, rh->type, device_size, rh->length, &rh->offset)) {
 		log_err(cd, "Failed to get reencryption offset.");
 		return -EINVAL;
