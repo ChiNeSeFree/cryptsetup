@@ -1796,10 +1796,10 @@ luks2_reencrypt_info LUKS2_reenc_status(struct luks2_hdr *hdr)
 	return REENCRYPT_CRASH;
 }
 
-static int _offset_encrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t *offset)
+static int _offset_encrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t *reencrypt_length, uint64_t *offset)
 {
 	json_object *jobj_segment;
-	uint64_t tmp, linear_length = 0;
+	uint64_t data_offset, tmp, linear_length = 0;
 	int sg, segs = json_segments_count(jobj_segments);
 	int64_t data_shift = LUKS2_reencrypt_data_shift(hdr);
 
@@ -1813,7 +1813,7 @@ static int _offset_encrypt(struct luks2_hdr *hdr, json_object *jobj_segments, ui
 		}
 
 		if (segs == 2) {
-			*offset = json_segment_get_size(jobj_segment, 1);
+			*offset = json_segment_get_size(jobj_segment, 0);
 			return 0;
 		}
 
@@ -1823,13 +1823,20 @@ static int _offset_encrypt(struct luks2_hdr *hdr, json_object *jobj_segments, ui
 	/* find reencrypt offset with data shift */
 	for (sg = 0; sg < segs; sg++)
 		if (LUKS2_segment_is_type(hdr, sg, "linear"))
-			linear_length += LUKS2_segment_size(hdr, sg, 1);
+			linear_length += LUKS2_segment_size(hdr, sg, 0);
 
+	/* all active linear segments length */
 	if (linear_length) {
-		tmp = LUKS2_get_data_offset(hdr);
-		if (linear_length < tmp)
+		data_offset = LUKS2_get_data_offset(hdr) << SECTOR_SHIFT;
+		/* this must not happer. first linear segment is exaclty data offset long */
+		if (linear_length < data_offset)
 			return -EINVAL;
-		*offset = linear_length - tmp;
+		tmp = linear_length - data_offset;
+		if (tmp < imaxabs(data_shift)) {
+			*offset = imaxabs(data_shift);
+			*reencrypt_length = tmp;
+		} else
+			*offset = tmp;
 		return 0;
 	}
 
@@ -1853,15 +1860,15 @@ static int _offset_reencrypt(struct luks2_hdr *hdr, json_object *jobj_segments, 
 		return 0;
 	}
 
-	tmp = get_last_data_offset(jobj_segments, "crypt") >> SECTOR_SHIFT;
-	if (tmp < LUKS2_get_data_offset(hdr))
+	tmp = get_last_data_offset(jobj_segments, "crypt");
+	if (tmp < LUKS2_get_data_offset(hdr) << SECTOR_SHIFT)
 		return -EINVAL;
 
-	*offset = tmp - LUKS2_get_data_offset(hdr);
+	*offset = tmp - (LUKS2_get_data_offset(hdr) << SECTOR_SHIFT);
 	return 0;
 }
 
-static int _offset_decrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t device_size, uint64_t reencrypt_length, uint64_t *offset)
+static int _offset_decrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t device_size, uint64_t *reencrypt_length, uint64_t *offset)
 {
 	json_object *jobj_segment;
 	int segs = json_segments_count(jobj_segments);
@@ -1877,12 +1884,12 @@ static int _offset_decrypt(struct luks2_hdr *hdr, json_object *jobj_segments, ui
 	}
 
 	if (segs == 2) {
-		*offset = json_segment_get_size(jobj_segment, 1);
+		*offset = json_segment_get_size(jobj_segment, 0);
 		return 0;
 	} else if (segs == 1) {
-		if (device_size < reencrypt_length)
+		if (device_size < *reencrypt_length)
 			return -EINVAL;
-		*offset = (device_size - reencrypt_length) >> SECTOR_SHIFT;
+		*offset = device_size - *reencrypt_length;
 		return 0;
 	} else
 		return -EINVAL;
@@ -1890,7 +1897,7 @@ static int _offset_decrypt(struct luks2_hdr *hdr, json_object *jobj_segments, ui
 
 /* must be always relative to data offset */
 /* the LUKS2 header MUST be valid */
-int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_size, uint64_t reencrypt_length, uint64_t *offset)
+int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_size, uint64_t *reencrypt_length, uint64_t *offset)
 {
 	int sg;
 	json_object *jobj_segments;
@@ -1902,7 +1909,7 @@ int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_
 	json_object_object_get_ex(hdr->jobj, "segments", &jobj_segments);
 	sg = json_segments_segment_in_reencrypt(jobj_segments);
 	if (sg >= 0) {
-		*offset = LUKS2_segment_offset(hdr, sg, 1) - LUKS2_get_data_offset(hdr);
+		*offset = LUKS2_segment_offset(hdr, sg, 0) - (LUKS2_get_data_offset(hdr) << SECTOR_SHIFT);
 		return 0;
 	}
 
@@ -1910,7 +1917,7 @@ int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_
 	case REENCRYPT:
 		return _offset_reencrypt(hdr, jobj_segments, offset);
 	case ENCRYPT:
-		return _offset_encrypt(hdr, jobj_segments, offset);
+		return _offset_encrypt(hdr, jobj_segments, reencrypt_length, offset);
 	case DECRYPT:
 		return _offset_decrypt(hdr, jobj_segments, device_size, reencrypt_length, offset);
 	default:

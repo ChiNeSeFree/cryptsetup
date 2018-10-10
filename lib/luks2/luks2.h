@@ -172,6 +172,7 @@ struct luks2_reenc_context {
 	int digest_new;
 	json_object *jobj_segment_old;
 	int digest_old;
+	json_object *jobj_segment_moved;
 };
 
 int LUKS2_reenc_create_segments(struct crypt_device *cd,
@@ -533,7 +534,7 @@ int LUKS2_wipe_header_areas(struct crypt_device *cd,
 	struct luks2_hdr *hdr);
 
 uint64_t LUKS2_get_data_offset(struct luks2_hdr *hdr);
-int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_size, uint64_t reencrypt_length, uint64_t *offset);
+int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_size, uint64_t *reencrypt_length, uint64_t *offset);
 uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_context *rh, uint64_t length);
 int LUKS2_get_sector_size(struct luks2_hdr *hdr);
 const char *LUKS2_get_cipher(struct luks2_hdr *hdr, int segment);
