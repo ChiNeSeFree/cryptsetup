@@ -27,9 +27,11 @@
 
 #include "luks2_internal.h"
 
-// debug only for devel purposes
+// #define DEBUG_TIME 1
+#ifdef DEBUG_TIME
 #include <math.h>
 #include <sys/time.h>
+#endif
 
 void LUKS2_reenc_context_destroy(struct luks2_reenc_context *rh)
 {
@@ -1501,6 +1503,7 @@ static int reencrypt_hotzone_protect_final(struct crypt_device *cd,
 	return r > 0 ? 0 : r;
 }
 
+#ifdef DEBUG_TIME
 static double time_diff(struct timeval *start, struct timeval *end)
 {
 	return (end->tv_sec - start->tv_sec)
@@ -1508,14 +1511,18 @@ static double time_diff(struct timeval *start, struct timeval *end)
 }
 
 static struct timeval start_time;
+#endif
 
 static void time_start(void)
 {
+#ifdef DEBUG_TIME
 	gettimeofday(&start_time, NULL);
+#endif
 }
 
 static void time_end(struct crypt_device *cd, const char *routine)
 {
+#ifdef DEBUG_TIME
 	double tdiff;
 	struct timeval end_time;
 
@@ -1528,6 +1535,7 @@ static void time_end(struct crypt_device *cd, const char *routine)
 		(unsigned long long)tdiff / 60,
 		(unsigned long long)tdiff % 60,
 		(unsigned long long)((tdiff - floor(tdiff)) * 1000.0));
+#endif
 }
 
 static int continue_reencryption(struct luks2_reenc_context *rh, uint64_t device_size)
