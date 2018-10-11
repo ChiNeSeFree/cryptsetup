@@ -115,17 +115,6 @@ static int _load_segments(struct crypt_device *cd, struct luks2_hdr *hdr, struct
 
 	log_dbg("Calculating segments.");
 
-	if (device_size < rh->offset) {
-		log_err(cd, "Reencryption offset %" PRIu64 " is beyond device size %" PRIu64 ".\n", rh->offset, device_size);
-		return -EINVAL;
-	}
-
-	if (rh->length > (device_size - rh->offset)) {
-		rh->length = device_size - rh->offset;
-		log_dbg("Adjusting reenc_length parameter: dev size: %" PRIu64 ", reenc_offset: %" PRIu64
-			", reenc_length: %" PRIu64 ".", device_size, rh->offset, rh->length);
-	}
-
 	r = LUKS2_reenc_create_segments(cd, hdr, rh, device_size);
 	if (r) {
 		log_err(cd, "Failed to create reencryption segments.\n");
@@ -2028,6 +2017,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 
 		/* TODO: for future i/o throttling. This is the spot */
 
+		/* FIXME: update data pointers ? */
 		if (rh.type == ENCRYPT && rh.rp.type == REENC_PROTECTION_DATASHIFT) {
 			if (rh.offset)
 				rh.offset += rh.data_shift;
@@ -2041,11 +2031,19 @@ int crypt_reencrypt(struct crypt_device *cd,
 			if (rh.offset < rh.length)
 				rh.length = rh.offset;
 			rh.offset -= rh.length;
-		} else
+		} else {
 			rh.offset += read;
+			if (rh.offset + rh.length > device_size)
+				rh.length = device_size - rh.offset;
+		}
 
 		if (progress && progress(device_size, rh.offset, NULL))
 			quit = 1;
+
+		if (device_size < rh.offset) {
+			log_err(cd, "Reencryption offset %" PRIu64 " is beyond device size %" PRIu64 ".", rh.offset, device_size);
+			return -EINVAL;
+		}
 
 		r = _load_segments(cd, hdr, &rh, device_size);
 		if (r) {
