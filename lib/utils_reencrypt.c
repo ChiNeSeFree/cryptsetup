@@ -818,7 +818,7 @@ out:
  * 	1) audit log routines
  * 	2) can't we derive hotzone device name from crypt context? (unlocked name, device uuid, etc?)
  */
-int reenc_load_overlay_device(struct crypt_device *cd, struct luks2_hdr *hdr,
+static int reenc_load_overlay_device(struct crypt_device *cd, struct luks2_hdr *hdr,
 	const char *overlay, const char *hotzone, struct volume_key *vks[4], uint64_t size)
 {
 	char hz_path[PATH_MAX];
@@ -1129,6 +1129,63 @@ static int reenc_refresh_helper_devices(struct crypt_device *cd, const char *ove
 		log_err(cd, "Failed to resume device %s.\n", overlay);
 	else
 		log_dbg("Resume device %s.", overlay);
+
+	return r;
+}
+
+#ifdef DEBUG_TIME
+static double time_diff(struct timeval *start, struct timeval *end)
+{
+	return (end->tv_sec - start->tv_sec)
+		+ (end->tv_usec - start->tv_usec) / 1E6;
+}
+
+static struct timeval start_time;
+#endif
+
+static void time_start(void)
+{
+#ifdef DEBUG_TIME
+	gettimeofday(&start_time, NULL);
+#endif
+}
+
+static void time_end(struct crypt_device *cd, const char *routine)
+{
+#ifdef DEBUG_TIME
+	double tdiff;
+	struct timeval end_time;
+
+	gettimeofday(&end_time, NULL);
+	tdiff = time_diff(&start_time, &end_time);
+	start_time = end_time;
+
+	log_std(cd, "%s: time %02llu:%02llu.%03llu\n",
+		routine,
+		(unsigned long long)tdiff / 60,
+		(unsigned long long)tdiff % 60,
+		(unsigned long long)((tdiff - floor(tdiff)) * 1000.0));
+#endif
+}
+
+static int reenc_refresh_overlay_devices(struct crypt_device *cd,
+		struct luks2_hdr *hdr,
+		const char *overlay,
+		const char *hotzone,
+		struct volume_key *vks[4],
+		uint64_t device_size)
+{
+	int r = reenc_load_overlay_device(cd, hdr, overlay, hotzone, vks, device_size);
+	time_end(cd, "overlay device load");
+	if (r) {
+		log_err(cd, "Failed to reload overlay device %s.\n", overlay);
+		return r;
+	}
+
+	r = reenc_refresh_helper_devices(cd, overlay, hotzone);
+	time_end(cd, "overlay device refresh");
+	if (r)
+		log_err(cd, "Failed to refresh helper devices.\n");
 
 	return r;
 }
@@ -1485,41 +1542,6 @@ static int reencrypt_hotzone_protect_final(struct crypt_device *cd,
 	r = LUKS2_keyslot_reencrypt_store(cd, hdr, rh->reenc_keyslot, pbuffer, len);
 
 	return r > 0 ? 0 : r;
-}
-
-#ifdef DEBUG_TIME
-static double time_diff(struct timeval *start, struct timeval *end)
-{
-	return (end->tv_sec - start->tv_sec)
-		+ (end->tv_usec - start->tv_usec) / 1E6;
-}
-
-static struct timeval start_time;
-#endif
-
-static void time_start(void)
-{
-#ifdef DEBUG_TIME
-	gettimeofday(&start_time, NULL);
-#endif
-}
-
-static void time_end(struct crypt_device *cd, const char *routine)
-{
-#ifdef DEBUG_TIME
-	double tdiff;
-	struct timeval end_time;
-
-	gettimeofday(&end_time, NULL);
-	tdiff = time_diff(&start_time, &end_time);
-	start_time = end_time;
-
-	log_std(cd, "%s: time %02llu:%02llu.%03llu\n",
-		routine,
-		(unsigned long long)tdiff / 60,
-		(unsigned long long)tdiff % 60,
-		(unsigned long long)((tdiff - floor(tdiff)) * 1000.0));
-#endif
 }
 
 static int continue_reencryption(struct luks2_reenc_context *rh, uint64_t device_size)
@@ -1920,20 +1942,10 @@ int crypt_reencrypt(struct crypt_device *cd,
 		log_dbg("Actual header segments post pre assign:\n%s", LUKS2_debug_dump_segments(hdr));
 
 		if (online) {
-			/* TODO: fold in single routine: refresh and suspend hotzone */
-			r = reenc_load_overlay_device(cd, hdr, overlay, hotzone, vks, device_size);
-			if (r) {
-				log_err(cd, "Failed to reload overlay device %s.\n", overlay);
+			r = reenc_refresh_overlay_devices(cd, hdr, overlay, hotzone, vks, device_size);
+			/* Teardown overlay devices with dm-error. None bio shall pass! */
+			if (r)
 				goto err;
-			}
-			time_end(cd, "overlay device load");
-
-			r = reenc_refresh_helper_devices(cd, overlay, hotzone);
-			if (r) {
-				log_err(cd, "Failed to refresh helper devices.\n");
-				goto err;
-			}
-			time_end(cd, "overlay device refresh");
 		}
 
 #ifdef DEBUG_DMTABLES
@@ -1991,6 +2003,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 		r = reencrypt_hotzone_protect_final(cd, hdr, &rh, reenc_buffer, read);
 		if (r < 0) {
 			log_err(cd, "Failed finalize hotozone protection, retval = %d", r);
+			/* Teardown overlay devices with dm-error. None bio shall pass! */
 			return -EINVAL;
 		}
 #ifdef DEBUG
@@ -2079,6 +2092,7 @@ err:
 
 	/* use directly 'after' segments */
 	if (online && !r) {
+		/* why ? seems it should go */
 		if (reenc_assign_segments(cd, hdr, &rh, 0, 1))
 			log_err(cd, "Failed to assign reenc segments.\n");
 

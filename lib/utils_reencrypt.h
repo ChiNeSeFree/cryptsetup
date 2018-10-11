@@ -48,13 +48,6 @@ int LUKS2_reenc_recover(struct crypt_device *cd,
 
 void LUKS2_reenc_context_destroy(struct luks2_reenc_context *rh);
 
-int reenc_load_overlay_device(struct crypt_device *cd,
-	struct luks2_hdr *hdr,
-	const char *overlay,
-	const char *hotzone,
-	struct volume_key *vks[4],
-	uint64_t size);
-
 int reenc_replace_device(struct crypt_device *cd, const char *target, const char *source, uint32_t flags);
 
 int reenc_swap_backing_device(struct crypt_device *cd, const char *name, const char *new_backend_name, uint32_t flags);
