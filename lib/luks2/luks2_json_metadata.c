@@ -1930,7 +1930,6 @@ int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_
 uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_context *rh, uint64_t keyslot_area_length)
 {
 	int reenc_seg;
-	int64_t tmp;
 	uint64_t length;
 
 	/* if reencryption crashed return directly the crash length */
@@ -1942,10 +1941,9 @@ uint64_t LUKS2_get_reencrypt_length(struct luks2_hdr *hdr, struct luks2_reenc_co
 		length = rh->rp.p.noop.hz_size ?: LUKS2_DEFAULT_REENCRYPTION_LENGTH;
 	else if (rh->rp.type == REENC_PROTECTION_CHECKSUM)
 		length = (keyslot_area_length / rh->rp.p.csum.hash_size - 1) * rh->alignment;
-	else if (rh->rp.type == REENC_PROTECTION_DATASHIFT) {
-		tmp = LUKS2_reencrypt_data_shift(hdr);
-		length = (uint64_t) (tmp < 0 ? -tmp : tmp);
-	} else
+	else if (rh->rp.type == REENC_PROTECTION_DATASHIFT)
+		length = imaxabs(LUKS2_reencrypt_data_shift(hdr));
+	else
 		length = keyslot_area_length;
 
 	length -= (length % rh->alignment);

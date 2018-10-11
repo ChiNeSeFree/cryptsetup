@@ -296,7 +296,6 @@ int LUKS2_reenc_recover(struct crypt_device *cd,
 	const struct volume_key *vk_old, *vk_new;
 	size_t count, s;
 	ssize_t read;
-	json_object *jobj;
 	unsigned protection;
 	uint64_t area_offset, area_length, area_length_read, crash_iv_offset,
 		 data_offset = crypt_get_data_offset(cd) << SECTOR_SHIFT;
@@ -476,17 +475,13 @@ int LUKS2_reenc_recover(struct crypt_device *cd,
 	case  REENC_PROTECTION_DATASHIFT:
 		log_dbg("Data shift based recovery.");
 
-		jobj = json_segments_get_segment(rh->jobj_segs_pre, 1);
-		/* FIXME: what if reencrypt segment is also the last one */
-		/* and this seems too complex */
-		/* note, this works for encryption only and following wrapper is alway (noop/cipher_null) */
 		if (rseg == 0) {
 			r = crypt_storage_wrapper_init(cd, &cw1, crypt_data_device(cd),
-					json_segment_get_offset(jobj, 0) + json_segment_get_size(jobj, 0), 0, 0,
+					json_segment_get_offset(rh->jobj_segment_moved, 0), 0, 0,
 					LUKS2_reencrypt_segment_cipher_old(hdr), NULL, 0);
 		} else
 			r = crypt_storage_wrapper_init(cd, &cw1, crypt_data_device(cd),
-					data_offset + rh->offset - rh->length, 0, 0,
+					data_offset + rh->offset - imaxabs(rh->data_shift), 0, 0,
 					LUKS2_reencrypt_segment_cipher_old(hdr), NULL, 0);
 		if (r) {
 			log_err(cd, "Failed to initialize old key storage wrapper.\n");
