@@ -1704,6 +1704,40 @@ static size_t LUKS2_get_reencrypt_buffer_length(struct luks2_reenc_context *rh)
 	return rh->length;
 }
 
+/* FIXME: remove read parameter and replace with rh.length internally */
+static int _update_reencrypt_context(struct crypt_device *cd,
+	struct luks2_reenc_context *rh,
+	uint64_t read,
+	uint64_t device_size)
+{
+	if (rh->type == ENCRYPT && rh->rp.type == REENC_PROTECTION_DATASHIFT) {
+		if (rh->offset)
+			rh->offset += rh->data_shift;
+		if (rh->offset && (rh->offset < imaxabs(rh->data_shift))) {
+			rh->length = rh->offset;
+			rh->offset = imaxabs(rh->data_shift);
+		}
+		if (!rh->offset)
+			rh->length = imaxabs(rh->data_shift);
+	} else if (rh->type == DECRYPT) {
+		if (rh->offset < rh->length)
+			rh->length = rh->offset;
+		rh->offset -= rh->length;
+	} else {
+		rh->offset += read;
+		/* it fails in-case of device_size < rh->offset later */
+		if (device_size - rh->offset < rh->length)
+			rh->length = device_size - rh->offset;
+	}
+
+	if (device_size < rh->offset) {
+		log_err(cd, "Error: Calculated reencryption offset %" PRIu64 " is beyond device size %" PRIu64 ".", rh->offset, device_size);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 /* FIXME:
  * 	1) audit whether helper devices (hotzone and overlay) can't be derived from crypt context.
  * 	2) checksums handling
@@ -1927,7 +1961,6 @@ int crypt_reencrypt(struct crypt_device *cd,
 
 		/* TODO: can we decrypt buffer in async mode? */
 
-		/* Currently it's a commit point in LUKS2 header */
 		r = reencrypt_hotzone_protect_init(cd, &rh, reenc_buffer, read);
 		if (r < 0) {
 			log_err(cd, "Failed initialize hotozone protection, retval = %d", r);
@@ -2017,33 +2050,14 @@ int crypt_reencrypt(struct crypt_device *cd,
 
 		/* TODO: for future i/o throttling. This is the spot */
 
-		/* FIXME: update data pointers ? */
-		if (rh.type == ENCRYPT && rh.rp.type == REENC_PROTECTION_DATASHIFT) {
-			if (rh.offset)
-				rh.offset += rh.data_shift;
-			if (rh.offset && (rh.offset < imaxabs(rh.data_shift))) {
-				rh.length = rh.offset;
-				rh.offset = imaxabs(rh.data_shift);
-			}
-			if (!rh.offset)
-				rh.length = imaxabs(rh.data_shift);
-		} else if (rh.type == DECRYPT) {
-			if (rh.offset < rh.length)
-				rh.length = rh.offset;
-			rh.offset -= rh.length;
-		} else {
-			rh.offset += read;
-			if (rh.offset + rh.length > device_size)
-				rh.length = device_size - rh.offset;
+		r = _update_reencrypt_context(cd, &rh, read, device_size);
+		if (r) {
+			log_err(cd, "Failed to update reencryption context.");
+			return r;
 		}
 
 		if (progress && progress(device_size, rh.offset, NULL))
 			quit = 1;
-
-		if (device_size < rh.offset) {
-			log_err(cd, "Reencryption offset %" PRIu64 " is beyond device size %" PRIu64 ".", rh.offset, device_size);
-			return -EINVAL;
-		}
 
 		r = _load_segments(cd, hdr, &rh, device_size);
 		if (r) {
