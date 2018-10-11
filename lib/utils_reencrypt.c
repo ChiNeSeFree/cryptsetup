@@ -2023,7 +2023,9 @@ int crypt_reencrypt(struct crypt_device *cd,
 		time_end(cd, "decryption");
 
 		time_end(cd, "device write");
-		crypt_storage_wrapper_datasync(cw2);
+		/* Otherwise it gets synced with metadata update at mda commit point */
+		if (crypt_metadata_device(cd) != crypt_data_device(cd))
+			crypt_storage_wrapper_datasync(cw2);
 		time_end(cd, "datasync");
 
 		/* metadata commit safe point */
