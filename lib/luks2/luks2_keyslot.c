@@ -263,11 +263,11 @@ int LUKS2_keyslot_area(struct luks2_hdr *hdr,
 
 	if (!json_object_object_get_ex(jobj_area, "offset", &jobj))
 		return -EINVAL;
-	*offset = json_object_get_int64(jobj);
+	*offset = json_object_get_uint64(jobj);
 
 	if (!json_object_object_get_ex(jobj_area, "size", &jobj))
 		return -EINVAL;
-	*length = json_object_get_int64(jobj);
+	*length = json_object_get_uint64(jobj);
 
 	return 0;
 }

@@ -128,13 +128,17 @@ int json_segments_count(json_object *jobj_segments)
 
 uint64_t json_segments_get_first_data_offset(json_object *jobj_segments, unsigned blockwise)
 {
-	json_object *jobj;
-
-	/* FIXME this could be fatal. add assert? */
-	if (!json_object_object_get_ex(jobj_segments, "0", &jobj))
+	if (!jobj_segments)
 		return 0;
 
-	return json_segment_get_offset(jobj, blockwise);
+	json_object_object_foreach(jobj_segments, slot, val) {
+		UNUSED(slot);
+		if (LUKS2_segment_ignore(val))
+			continue;
+		return json_segment_get_offset(val, blockwise);
+	}
+
+	return 0;
 }
 
 json_object *json_segments_get_segment(json_object *jobj_segments, int segment)

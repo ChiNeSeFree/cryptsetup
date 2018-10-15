@@ -247,6 +247,14 @@ static int _reenc_load(struct crypt_device *cd,
 
 	_load_backup_segments(hdr, rh);
 
+	if (rh->type == DECRYPT || (rh->data_shift < 0)) {
+		rh->direction = BACKWARD;
+		rh->progress = device_size - rh->offset - rh->length;
+	} else {
+		rh->direction = FORWARD;
+		rh->progress = rh->offset;
+	}
+
 	log_dbg("reencrypt-previous digest id: %d", rh->digest_old);
 	log_dbg("reencrypt-previous segment: %s", rh->jobj_segment_old ? json_object_to_json_string_ext(rh->jobj_segment_old, JSON_C_TO_STRING_PRETTY) : "<missing>");
 	log_dbg("reencrypt-final digest id: %d", rh->digest_new);
@@ -256,6 +264,7 @@ static int _reenc_load(struct crypt_device *cd,
 	log_dbg("reencrypt offset: %" PRIu64, rh->offset);
 	log_dbg("reencrypt shift: %" PRIi64, rh->data_shift);
 	log_dbg("reencrypt alignemnt: %zu", rh->alignment);
+	log_dbg("reencrypt progress: %" PRIu64, rh->progress);
 
 	return rh->length < 512 ? -EINVAL : 0;
 }
@@ -881,7 +890,7 @@ int reenc_replace_device(struct crypt_device *cd, const char *target, const char
 	log_dbg("Replacing table in device %s with table from device %s.", target, source);
 
 	/* check only whether target device exists */
-	r = dm_query_device(cd, target, 0, &dmd_target);
+	r = dm_status_device(cd, target);
 	if (r < 0) {
 		if (r == -ENODEV)
 			exists = 0;
@@ -1040,8 +1049,7 @@ err:
 static int reenc_init_helper_devices(struct crypt_device *cd,
 				     const char *name,
 				     const char *hotzone,
-				     const char *overlay,
-				     uint64_t *device_size)
+				     const char *overlay)
 {
 	int r;
 
@@ -1546,10 +1554,13 @@ static int reencrypt_hotzone_protect_final(struct crypt_device *cd,
 
 static int continue_reencryption(struct luks2_reenc_context *rh, uint64_t device_size)
 {
+	/*
 	if (rh->type == DECRYPT || (rh->type == ENCRYPT && rh->data_shift))
 		return !rh->encrypt_done;
 	else
 		return (device_size > rh->offset);
+		*/
+	return device_size > rh->progress;
 }
 
 static int _load_and_verify_key(struct crypt_device *cd,
@@ -1663,6 +1674,8 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 	if (LUKS2_keyslot_area(hdr, rh->reenc_keyslot, &dummy, &area_length) < 0)
 		return -EINVAL;
 
+	log_dbg("Area length %" PRIu64, area_length);
+
 	if (!strcmp(params->protection, "noop")) {
 		log_dbg("Switching protection to noop.");
 		rh->rp.type = REENC_PROTECTION_NOOP;
@@ -1704,7 +1717,20 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 		return -EINVAL;
 	}
 
+	if (rh->offset > device_size)
+		return -EINVAL;
+	if (rh->length > device_size - rh->offset)
+		rh->length = device_size - rh->offset;
+
 	_load_backup_segments(hdr, rh);
+
+	if (rh->type == DECRYPT || (rh->data_shift < 0)) {
+		rh->direction = BACKWARD;
+		rh->progress = device_size - rh->offset - rh->length;
+	} else {
+		rh->direction = FORWARD;
+		rh->progress = rh->offset;
+	}
 
 	log_dbg("reencrypt-previous digest id: %d", rh->digest_old);
 	log_dbg("reencrypt-previous segment: %s", rh->jobj_segment_old ? json_object_to_json_string_ext(rh->jobj_segment_old, JSON_C_TO_STRING_PRETTY) : "<missing>");
@@ -1715,6 +1741,7 @@ static int LUKS2_reenc_update_context(struct crypt_device *cd,
 	log_dbg("reencrypt offset: %" PRIu64, rh->offset);
 	log_dbg("reencrypt shift: %" PRIi64, rh->data_shift);
 	log_dbg("reencrypt alignemnt: %zu", rh->alignment);
+	log_dbg("reencrypt progress: %" PRIu64, rh->progress);
 
 	return rh->length < 512 ? -EINVAL : _load_segments(cd, hdr, rh, device_size);
 }
@@ -1756,6 +1783,8 @@ static int _update_reencrypt_context(struct crypt_device *cd,
 		log_err(cd, "Error: Calculated reencryption offset %" PRIu64 " is beyond device size %" PRIu64 ".", rh->offset, device_size);
 		return -EINVAL;
 	}
+
+	rh->progress += read;
 
 	return 0;
 }
@@ -1845,7 +1874,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 
 	/* initialise device masquarade if online */
 	if (online) {
-		r = reenc_init_helper_devices(cd, name, hotzone, overlay, &device_size);
+		r = reenc_init_helper_devices(cd, name, hotzone, overlay);
 		if (r)
 			return r;
 	}
@@ -1915,21 +1944,25 @@ int crypt_reencrypt(struct crypt_device *cd,
 		snprintf(backup_name, sizeof(backup_name), "clear-debug-luks2-backup-uuid-%s", crypt_get_uuid(cd));
 		crypt_header_backup(cd, CRYPT_LUKS2, backup_name);
 #endif
+	log_dbg("Progress %" PRIu64 ", device_size %" PRIu64, rh.progress, device_size);
+	if (progress && progress(device_size, 0, NULL))
+		quit = 1;
 
 	/* FIXME: the finish-or-not decisision must be more transparent */
 	rh.encrypt_done = json_segments_count(rh.jobj_segs_after) == 1;
 
 	while (continue_reencryption(&rh, device_size)) {
 
+		/* progress returns true if interrupted */
+		if (quit)
+			break;
+
+		/*
 		rh.encrypt_done = json_segments_count(rh.jobj_segs_after) == 1;
 		log_dbg("Encryption done = %d", rh.encrypt_done);
+		*/
 
 		log_dbg("Actual luks2 header segments:\n%s", LUKS2_debug_dump_segments(hdr));
-
-		if (quit) {
-			log_dbg("Reencryption interrupted.");
-			break;
-		}
 
 		time_start();
 		r = reenc_assign_segments(cd, hdr, &rh, 1, 0);
@@ -1967,7 +2000,7 @@ int crypt_reencrypt(struct crypt_device *cd,
 		read = crypt_storage_wrapper_read(cw1, read_offset, reenc_buffer, rh.length);
 		if (read < 0) {
 			log_err(cd, "Failed to read chunk starting at %zu.", read_offset);
-			break;
+			goto err;
 		}
 		time_end(cd, "device read");
 
@@ -2064,15 +2097,15 @@ int crypt_reencrypt(struct crypt_device *cd,
 		}
 
 		/* TODO: for future i/o throttling. This is the spot */
+		log_dbg("Progress %" PRIu64 ", device_size %" PRIu64, rh.progress, device_size);
+		if (progress && progress(device_size, rh.progress, NULL))
+			quit = 1;
 
 		r = _update_reencrypt_context(cd, &rh, read, device_size);
 		if (r) {
 			log_err(cd, "Failed to update reencryption context.");
 			return r;
 		}
-
-		if (progress && progress(device_size, rh.offset, NULL))
-			quit = 1;
 
 		r = _load_segments(cd, hdr, &rh, device_size);
 		if (r) {
@@ -2090,17 +2123,28 @@ err:
 	crypt_storage_wrapper_destroy(cw1);
 	crypt_storage_wrapper_destroy(cw2);
 
-	/* use directly 'after' segments */
-	if (online && !r) {
-		/* why ? seems it should go */
-		if (reenc_assign_segments(cd, hdr, &rh, 0, 1))
-			log_err(cd, "Failed to assign reenc segments.\n");
+	log_dbg("Progress %" PRIu64 ", device_size %" PRIu64, rh.progress, device_size);
+	if (!r && progress && !quit)
+		progress(device_size, rh.progress, NULL);
 
-		if (reenc_load_overlay_device(cd, hdr, overlay, hotzone, vks, device_size))
-			log_err(cd, "Failed to load overlay device.\n");
+	if (online) {
+		if (!r) {
+			/* FIXME: what flags exactly? */
+			r = LUKS2_reload(cd, name, vks, CRYPT_ACTIVATE_KEYRING_KEY);
+			if (r)
+				log_err(cd, "Failed to reload %s device.", name);
+			if (!r) {
+				r = dm_resume_device(cd, name, 0);
+				if (r)
+					log_err(cd, "Failed to resume %s device.", name);
+			}
+		}
+		else {/* en error path we need to reinstate origin mapping with one or more keys without hotzone device */ }
+		dm_remove_device(cd, overlay, 0);
+		dm_remove_device(cd, hotzone, 0);
 	}
 
-	if (!r) {
+	if (!r && !continue_reencryption(&rh, device_size)) {
 		if (rh.digest_old >= 0)
 			for (i = 0; i < LUKS2_KEYSLOTS_MAX; i++)
 				if (LUKS2_digest_by_keyslot(NULL, hdr, i) == rh.digest_old)
@@ -2108,20 +2152,9 @@ err:
 		crypt_keyslot_destroy(cd, rh.reenc_keyslot);
 		if (reenc_erase_backup_segments(cd, hdr))
 			log_err(cd, "Failed to erase backup segments");
+		/* atomic erase */
 		if (update_reencryption_flag(cd, 0))
 			log_err(cd, "Failed to disable reencryption requirement flag.");
-	}
-
-	if (online) {
-		if (!r) {
-			if (dm_resume_device(cd, overlay, DM_ACTIVATE_PRIVATE))
-				log_err(cd, "Failed to resume %s device.\n", overlay);
-			if (reenc_replace_device(cd, name, overlay, 0))
-				log_err(cd, "Failed to replace %s device.\n", name);
-		}
-		else {/* en error path we need to reinstate origin mapping with one or more keys without hotzone device */ }
-		dm_remove_device(cd, overlay, 0);
-		dm_remove_device(cd, hotzone, 0);
 	}
 
 	LUKS2_reenc_context_destroy(&rh);

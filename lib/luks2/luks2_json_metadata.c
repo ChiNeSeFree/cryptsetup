@@ -2073,6 +2073,7 @@ const char *LUKS2_get_integrity(struct luks2_hdr *hdr, int segment)
 }
 
 /* FIXME: this only ensures that once we have journal encryption, it is not ignored. */
+/* implement segment count and type restrictions (crypt and only single crypt) */
 static int LUKS2_integrity_compatible(struct luks2_hdr *hdr)
 {
 	json_object *jobj1, *jobj2, *jobj3, *jobj4;
@@ -2169,27 +2170,140 @@ int LUKS2_get_sector_size(struct luks2_hdr *hdr)
 	return json_segment_get_sector_size(jobj_segment) ?: SECTOR_SIZE;
 }
 
-static int _activate_custom_multi(struct crypt_device *cd,
+static int _prepare_multi_dmd(struct crypt_device *cd,
+	struct luks2_hdr *hdr,
+	struct volume_key *vks[4],
+	json_object *jobj_segments,
+	struct crypt_dm_active_device *dmd)
+{
+	int s, r;
+	enum devcheck device_check;
+	json_object *jobj;
+	uint64_t data_offset, segment_size, segment_offset, segment_start = 0;
+	const struct volume_key *vk;
+
+	if (dmd->flags & CRYPT_ACTIVATE_SHARED)
+		device_check = DEV_SHARED;
+	else
+		device_check = DEV_EXCL;
+
+	/* FIXME: replace == 0 with < LUKS2_header_size() */
+	data_offset = json_segments_get_first_data_offset(jobj_segments, 1);
+	if (data_offset == 0 &&
+	    crypt_data_device(cd) == crypt_metadata_device(cd)) {
+		log_dbg("Internal error. Wrong data offset");
+		return -EINVAL;
+	}
+
+	r = device_block_adjust(cd, crypt_data_device(cd), device_check,
+				data_offset, &dmd->size, &dmd->flags);
+	if (r)
+		return r;
+
+	r = -EINVAL;
+
+	for (s = 0; s < dmd->segment_count; s++) {
+		jobj = json_segments_get_segment(jobj_segments, s);
+		if (!jobj) {
+			log_dbg("Internal error. Segment %d is null.", s);
+			return -EINVAL;
+		}
+
+		segment_offset = json_segment_get_offset(jobj, 1);
+		segment_size = json_segment_get_size(jobj, 1);
+		/* 'dynamic' length allowed in last segment only */
+		if (!segment_size && s == dmd->segment_count - 1)
+			segment_size = dmd->size - segment_start;
+		if (!segment_size) {
+			log_dbg("Internal error. Wrong segment size %d", s);
+			return -EINVAL;
+		}
+
+		if (!strcmp(json_segment_type(jobj), "crypt")) {
+			vk = crypt_volume_key_by_digest(vks, LUKS2_digest_by_segment(cd, hdr, s));
+			if (!vk) {
+				log_err(cd, "Missing key for dm-crypt segment %d", s);
+				return -EINVAL;
+			}
+
+			r = dm_crypt_target_set(dmd->segment + s, segment_start, segment_size,
+						crypt_data_device(cd),
+						vk,
+						json_segment_get_cipher(jobj),
+						json_segment_get_iv_offset(jobj),
+						segment_offset,
+						"none",
+						0,
+						json_segment_get_sector_size(jobj));
+			if (r) {
+				log_err(cd, _("Failed to set dm-crypt segment."));
+				return r;
+			}
+		} else if (!strcmp(json_segment_type(jobj), "linear")) {
+			r = dm_linear_target_set(dmd->segment + s, segment_start, segment_size, crypt_data_device(cd), segment_offset);
+			if (r) {
+				log_err(cd, _("Failed to set dm-linear segment."));
+				return r;
+			}
+		} else
+			return -EINVAL;
+
+		segment_start += segment_size;
+	}
+
+	return r;
+}
+
+/* FIXME: This shares almost all code with activate_multi_custom */
+static int _reload_custom_multi(struct crypt_device *cd,
 	const char *name,
 	struct volume_key *vks[4],
 	json_object *jobj_segments,
 	uint32_t flags)
 {
-	int s, r;
+	int r;
+	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
+	struct crypt_dm_active_device dmd =  {
+		.uuid   = crypt_get_uuid(cd),
+		.segment_count = json_segments_count(jobj_segments)
+	};
+
+	/* do not allow activation when particular requirements detected */
+	if ((r = LUKS2_unmet_requirements(cd, hdr, CRYPT_REQUIREMENT_ONLINE_REENCRYPT, 0)))
+		return r;
+
+	/* Add persistent activation flags */
+	if (!(flags & CRYPT_ACTIVATE_IGNORE_PERSISTENT))
+		LUKS2_config_get_flags(cd, hdr, &dmd.flags);
+
+	dmd.flags |= (flags | CRYPT_ACTIVATE_SHARED);
+
+	r = _prepare_multi_dmd(cd, hdr, vks, jobj_segments, &dmd);
+	if (!r)
+		r = dm_reload_device(cd, name, CRYPT_LUKS2, &dmd);
+
+	dm_targets_free(&dmd);
+	return r;
+}
+
+static int _activate_integrity(struct crypt_device *cd,
+	const char *name,
+	struct volume_key *vk,
+	json_object *jobj_segments,
+	uint32_t flags)
+{
+	int r;
 	enum devcheck device_check;
-	json_object *jobj;
 	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
 	struct crypt_dm_active_device dmd = {
 		.uuid   = crypt_get_uuid(cd),
 		.segment_count = json_segments_count(jobj_segments)
 	};
 	char dm_int_name[512], dm_int_dev_name[PATH_MAX];
-	uint64_t data_offset, segment_size, segment_offset, segment_start = 0;
 	struct device *idevice = NULL;
-	const struct volume_key *vk;
 
 	/* do not allow activation when particular requirements detected */
-	if ((r = LUKS2_unmet_requirements(cd, hdr, CRYPT_REQUIREMENT_ONLINE_REENCRYPT, 0)))
+	if ((r = LUKS2_unmet_requirements(cd, hdr, 0, 0)))
 		return r;
 
 	/* Add persistent activation flags */
@@ -2203,117 +2317,52 @@ static int _activate_custom_multi(struct crypt_device *cd,
 	else
 		device_check = DEV_EXCL;
 
-	if (crypt_get_integrity_tag_size(cd)) {
-		if (dmd.segment_count != 1)
-			return -EINVAL;
-
-		if (!LUKS2_integrity_compatible(hdr)) {
-			log_err(cd, "Unsupported device integrity configuration.");
-			return -EINVAL;
-		}
-
-		snprintf(dm_int_name, sizeof(dm_int_name), "%s_dif", name);
-		r = INTEGRITY_activate(cd, dm_int_name, NULL, NULL, NULL, NULL, flags);
-		if (r)
-			return r;
-
-		snprintf(dm_int_dev_name, sizeof(dm_int_dev_name), "%s/%s", dm_get_dir(), dm_int_name);
-		r = device_alloc(&idevice, dm_int_dev_name);
-		if (r) {
-			dm_remove_device(cd, dm_int_name, 0);
-			return r;
-		}
-
-		r = INTEGRITY_data_sectors(cd, crypt_data_device(cd),
-					   crypt_get_data_offset(cd) * SECTOR_SIZE,
-					   &dmd.size);
-		if (r < 0) {
-			log_err(cd, "Cannot detect integrity device size.");
-			device_free(idevice);
-			dm_remove_device(cd, dm_int_name, 0);
-			return r;
-		}
+	if (!LUKS2_integrity_compatible(hdr)) {
+		log_err(cd, "Unsupported device integrity configuration.");
+		return -EINVAL;
 	}
 
-	/* FIXME: replace == 0 with < LUKS2_header_size() */
-	data_offset = json_segments_get_first_data_offset(jobj_segments, 1);
-	if (data_offset == 0 && !idevice &&
-	    crypt_data_device(cd) == crypt_metadata_device(cd)) {
-		r = -EINVAL;
-		log_dbg("Internal error. Wrong data offset");
-		goto out;
+	snprintf(dm_int_name, sizeof(dm_int_name), "%s_dif", name);
+	r = INTEGRITY_activate(cd, dm_int_name, NULL, NULL, NULL, NULL, flags);
+	if (r)
+		return r;
+
+	snprintf(dm_int_dev_name, sizeof(dm_int_dev_name), "%s/%s", dm_get_dir(), dm_int_name);
+	r = device_alloc(&idevice, dm_int_dev_name);
+	if (r) {
+		dm_remove_device(cd, dm_int_name, 0);
+		return r;
 	}
 
-	if (idevice)
-		data_offset = 0;
+	r = INTEGRITY_data_sectors(cd, crypt_data_device(cd),
+				   crypt_get_data_offset(cd) * SECTOR_SIZE,
+				   &dmd.size);
+	if (r < 0) {
+		log_err(cd, "Cannot detect integrity device size.");
+		device_free(idevice);
+		dm_remove_device(cd, dm_int_name, 0);
+		return r;
+	}
 
 	r = device_block_adjust(cd, idevice ?: crypt_data_device(cd), device_check,
-				data_offset, &dmd.size,
+				idevice ? 0 : crypt_get_data_offset(cd), &dmd.size,
 				&dmd.flags);
-	if (r)
-		goto out;
 
-	r = -EINVAL;
-
-	for (s = 0; s < dmd.segment_count; s++) {
-		jobj = json_segments_get_segment(jobj_segments, s);
-		if (!jobj) {
-			log_dbg("Internal error. Segment %d is null.", s);
-			r = -EINVAL;
-			goto out;
-		}
-
-		segment_offset = json_segment_get_offset(jobj, 1);
-		segment_size = json_segment_get_size(jobj, 1);
-		/* 'dynamic' length allowed in last segment only */
-		if (!segment_size && s == dmd.segment_count - 1)
-			segment_size = dmd.size - segment_start;
-		if (!segment_size) {
-			log_dbg("Internal error. Wrong segment size %d", s);
-			r = -EINVAL;
-			goto out;
-		}
-
-		if (!strcmp(json_segment_type(jobj), "crypt")) {
-			vk = crypt_volume_key_by_digest(vks, LUKS2_digest_by_segment(cd, hdr, s));
-			if (!vk) {
-				log_err(cd, "Missing key for dm-crypt segment %d", s);
-				r = -EINVAL;
-				goto out;
-			}
-
-			r = dm_crypt_target_set(dmd.segment + s, segment_start, segment_size,
-						idevice ?: crypt_data_device(cd),
-						vk,
-						json_segment_get_cipher(jobj),
-						json_segment_get_iv_offset(jobj),
-						segment_offset,
-						crypt_get_integrity(cd) ?: "none",
-						crypt_get_integrity_tag_size(cd),
-						json_segment_get_sector_size(jobj));
-			if (r) {
-				log_err(cd, _("Failed to set dm-crypt segment.\n"));
-				goto out;
-			}
-		} else if (!strcmp(json_segment_type(jobj), "linear")) {
-			r = dm_linear_target_set(dmd.segment + s, segment_start, segment_size, crypt_data_device(cd), segment_offset);
-			if (r) {
-				log_err(cd, _("Failed to set dm-linear segment.\n"));
-				goto out;
-			}
-		} else {
-			r = -EINVAL;
-			goto out;
-		}
-
-		segment_start += segment_size;
-	}
+	if (!r)
+		r = dm_crypt_target_set(dmd.segment, 0, dmd.size,
+					idevice ?: crypt_data_device(cd),
+					vk,
+					LUKS2_get_cipher(hdr, CRYPT_DEFAULT_SEGMENT),
+					crypt_get_iv_offset(cd),
+					idevice ? 0 : crypt_get_data_offset(cd),
+					crypt_get_integrity(cd) ?: "none",
+					crypt_get_integrity_tag_size(cd),
+					crypt_get_sector_size(cd));
 
 	if (!r)
 		r = dm_create_device(cd, name, CRYPT_LUKS2, &dmd);
-out:
 
-	if (r < 0 && idevice)
+	if (r < 0)
 		dm_remove_device(cd, dm_int_name, 0);
 
 	device_free(idevice);
@@ -2321,13 +2370,47 @@ out:
 	return r;
 }
 
+int LUKS2_reload(struct crypt_device *cd,
+	const char *name,
+	struct volume_key *vks[4],
+	uint32_t flags)
+{
+	if (crypt_get_integrity_tag_size(cd))
+		return -ENOTSUP;
+
+	return _reload_custom_multi(cd, name, vks,
+			LUKS2_get_segments_jobj(crypt_get_hdr(cd, CRYPT_LUKS2)), flags);
+}
+
 int LUKS2_activate_multi(struct crypt_device *cd,
 	const char *name,
 	struct volume_key *vks[4],
 	uint32_t flags)
 {
-	return _activate_custom_multi(cd, name, vks,
-			LUKS2_get_segments_jobj(crypt_get_hdr(cd, CRYPT_LUKS2)), flags);
+	int r;
+	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
+	json_object *jobj_segments = LUKS2_get_segments_jobj(hdr);
+	struct crypt_dm_active_device dmd = {
+		.uuid   = crypt_get_uuid(cd),
+		.segment_count = json_segments_count(jobj_segments)
+	};
+
+	/* do not allow activation when particular requirements detected */
+	if ((r = LUKS2_unmet_requirements(cd, hdr, CRYPT_REQUIREMENT_ONLINE_REENCRYPT, 0)))
+		return r;
+
+	/* Add persistent activation flags */
+	if (!(flags & CRYPT_ACTIVATE_IGNORE_PERSISTENT))
+		LUKS2_config_get_flags(cd, hdr, &dmd.flags);
+
+	dmd.flags |= flags;
+
+	r = _prepare_multi_dmd(cd, hdr, vks, jobj_segments, &dmd);
+	if (!r)
+		r = dm_create_device(cd, name, CRYPT_LUKS2, &dmd);
+
+	dm_targets_free(&dmd);
+	return r;
 }
 
 int LUKS2_activate(struct crypt_device *cd,
@@ -2338,12 +2421,13 @@ int LUKS2_activate(struct crypt_device *cd,
 	struct luks2_hdr *hdr = crypt_get_hdr(cd, CRYPT_LUKS2);
 	struct volume_key *vks[3] = { vk };
 
-	if (LUKS2_segments_count(hdr) != 1) {
-		log_dbg("Single segment expected");
+	if (!hdr)
 		return -EINVAL;
-	}
 
-	return _activate_custom_multi(cd, name, vks, LUKS2_get_segments_jobj(hdr), flags);
+	if (crypt_get_integrity_tag_size(cd))
+		return _activate_integrity(cd, name, vk, LUKS2_get_segments_jobj(hdr), flags);
+	else
+		return LUKS2_activate_multi(cd, name, vks, flags);
 }
 
 int LUKS2_unmet_requirements(struct crypt_device *cd, struct luks2_hdr *hdr, uint32_t reqs_mask, int quiet)

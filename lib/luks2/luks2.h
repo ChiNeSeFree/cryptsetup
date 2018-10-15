@@ -150,9 +150,11 @@ struct reenc_protection {
 struct luks2_reenc_context {
 	/* reencryption window attributes */
 	uint64_t offset;
+	uint64_t progress;
 	uint64_t length;
 	int64_t data_shift;
 	size_t alignment;
+	enum { FORWARD = 0, BACKWARD } direction;
 
 	enum { REENCRYPT = 0, ENCRYPT, DECRYPT } type;
 
@@ -504,6 +506,11 @@ int LUKS2_digest_create(struct crypt_device *cd,
 int LUKS2_activate(struct crypt_device *cd,
 	const char *name,
 	struct volume_key *vk,
+	uint32_t flags);
+
+int LUKS2_reload(struct crypt_device *cd,
+	const char *name,
+	struct volume_key *vks[4],
 	uint32_t flags);
 
 int LUKS2_activate_multi(struct crypt_device *cd,
