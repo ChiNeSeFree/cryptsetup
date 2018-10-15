@@ -176,8 +176,10 @@ static int action_reencrypt_next(const char *device)
 	reenc_params.protection = opt_protection_mode;
 	reenc_params.hash = opt_protection_hash;
 
-	if (!opt_init_only)
-		r = crypt_reencrypt(cd, opt_active_name, opt_batch_mode ? NULL : tools_reencrypt_progress, &reenc_params);
+	if (!opt_init_only) {
+		set_int_handler(0);
+		r = crypt_reencrypt(cd, opt_active_name, tools_reencrypt_progress, &reenc_params);
+	}
 err:
 	crypt_safe_free(password);
 	crypt_free(cd);
@@ -231,7 +233,9 @@ static int action_reencrypt_resume(const char *device)
 	reenc_params.protection = opt_protection_mode;
 	reenc_params.hash = opt_protection_hash;
 
-	r = crypt_reencrypt(cd, opt_active_name, opt_batch_mode ? NULL : tools_reencrypt_progress, &reenc_params);
+	set_int_handler(0);
+
+	r = crypt_reencrypt(cd, opt_active_name, tools_reencrypt_progress, &reenc_params);
 err:
 	crypt_free(cd);
 	return r;
@@ -360,7 +364,9 @@ static int action_encrypt(const char *device)
 			goto err;
 		}
 
-		r = crypt_reencrypt(cd, opt_active_name, opt_batch_mode ? NULL : tools_reencrypt_progress, &reenc_params);
+		set_int_handler(0);
+
+		r = crypt_reencrypt(cd, opt_active_name, tools_reencrypt_progress, &reenc_params);
 	}
 err:
 	if (devfd >= 0)
@@ -442,7 +448,9 @@ static int action_decrypt(const char *device)
 			goto err;
 		}
 
-		r = crypt_reencrypt(cd, opt_active_name, opt_batch_mode ? NULL : tools_reencrypt_progress, &reenc_params);
+		set_int_handler(0);
+
+		r = crypt_reencrypt(cd, opt_active_name, tools_reencrypt_progress, &reenc_params);
 	}
 err:
 	if (devfd >= 0)
