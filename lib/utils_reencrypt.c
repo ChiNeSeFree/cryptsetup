@@ -702,10 +702,10 @@ static int _encrypt_set_segments(struct crypt_device *cd, struct luks2_hdr *hdr,
 
 	if (data_shift) {
 		/* future data_device layout: [future LUKS2 header][second data segment][empty space][first data segment] */
-		first_segment_offset = dev_size - data_offset;
+		first_segment_offset = dev_size;
 		first_segment_length = data_offset;
 		second_segment_offset = data_offset;
-		second_segment_length = dev_size - 2 * data_offset - imaxabs(data_shift);
+		second_segment_length = dev_size - data_offset - imaxabs(data_shift);
 	} else {
 		/* future data_device layout with deatached header: [first data segment] */
 		first_segment_offset = 0;
@@ -1357,10 +1357,11 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 	struct crypt_params_luks2 *params) /* NULL if not changed */
 {
 	char _cipher[128];
-	int devfd = -1, r, reencrypt_keyslot;
 	luks2_reencrypt_info ri;
 	struct luks2_hdr *hdr;
-	uint64_t dev_size;
+	int r, reencrypt_keyslot, devfd = -1;
+	uint32_t sector_size = params ? params->sector_size : SECTOR_SIZE;
+	uint64_t dev_size = 0;
 
 	if (onlyLUKS2(cd) || parse_reencryption_mode(reencrypt_mode))
 		return -EINVAL;
@@ -1381,6 +1382,21 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 		return -EINVAL;
 	}
 
+	if (MISALIGNED(imaxabs(data_shift), sector_size >> SECTOR_SHIFT)) {
+		log_err(cd, "Data shift is not aligned to requested encryption sector size (%" PRIu32 " bytes).", sector_size);
+		return -EINVAL;
+	}
+
+	r = device_block_adjust(cd, crypt_data_device(cd), strcmp(reencrypt_mode, "encrypt") ? DEV_OK : DEV_EXCL,
+				crypt_get_data_offset(cd), &dev_size, NULL);
+	if (r)
+		return r;
+
+	if (MISALIGNED(dev_size, sector_size >> SECTOR_SHIFT)) {
+		log_err(cd, "Data device is not aligned to requested encryption sector size (%" PRIu32 " bytes).", sector_size);
+		return -EINVAL;
+	}
+
 	/*
 	 * We must perform data move with exclusive open data device
 	 * to exclude another cryptsetup process to colide with
@@ -1397,10 +1413,6 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 			log_err(cd, "Failed to open %s in exclusive mode (perhaps already mapped or mounted).",
 				device_path(crypt_data_device(cd)));
 			goto err;
-		}
-		if ((r = device_size(crypt_data_device(cd), &dev_size))) {
-			log_err(cd, "Failed to read device_size.\n");
-			return r;
 		}
 	}
 
@@ -1423,7 +1435,7 @@ int crypt_reencrypt_init(struct crypt_device *cd,
 	/* </atomic_operation> */
 
 	if (!strcmp(reencrypt_mode, "encrypt")) {
-		r = _encrypt_set_segments(cd, hdr, dev_size, data_shift);
+		r = _encrypt_set_segments(cd, hdr, dev_size << SECTOR_SHIFT, data_shift);
 		if (r)
 			goto err;
 	}
