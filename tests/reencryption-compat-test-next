@@ -184,6 +184,14 @@ echo $PWD1 | $REENC $DEV -q --protection-mode noop $FAST_PBKDF_ARGON || fail
 check_hash $PWD1 $HASH1
 echo $PWD1 | $REENC $DEV -q -s 128 -c aes-cbc-plain --protection-mode checksum $FAST_PBKDF_ARGON || fail
 check_hash $PWD1 $HASH1
+echo $PWD1 | $REENC $DEV -q $FAST_PBKDF_ARGON --sector-size 4096 || fail
+check_hash $PWD1 $HASH1
+echo $PWD1 | $REENC $DEV -q -s 256 -c twofish-cbc-plain --protection-mode journal --sector-size 2048 $FAST_PBKDF_ARGON || fail
+check_hash $PWD1 $HASH1
+echo $PWD1 | $REENC $DEV -q --protection-mode noop $FAST_PBKDF_ARGON --sector-size 1024 || fail
+check_hash $PWD1 $HASH1
+echo $PWD1 | $REENC $DEV -q -s 128 -c aes-cbc-plain --protection-mode checksum --sector-size 512 $FAST_PBKDF_ARGON || fail
+check_hash $PWD1 $HASH1
 echo -n "[OK][4096/512 sector]"
 prepare sector_size=512 physblk_exp=3 dev_size_mb=256
 echo $PWD1 | $CRYPTSETUP -q luksFormat --type luks2 -s 128 -c aes-cbc-plain $FAST_PBKDF_ARGON $DEV || fail
@@ -213,6 +221,14 @@ check_hash $PWD1 $HASH2
 echo $PWD1 | $REENC $DEV -q --protection-mode noop $FAST_PBKDF_ARGON || fail
 check_hash $PWD1 $HASH2
 echo $PWD1 | $REENC $DEV -q -s 128 -c aes-cbc-plain --protection-mode checksum $FAST_PBKDF_ARGON || fail
+check_hash $PWD1 $HASH2
+echo $PWD1 | $REENC $DEV -q $FAST_PBKDF_ARGON --sector-size 4096 || fail
+check_hash $PWD1 $HASH2
+echo $PWD1 | $REENC $DEV -q -s 256 -c twofish-cbc-plain --protection-mode journal --sector-size 2048 $FAST_PBKDF_ARGON || fail
+check_hash $PWD1 $HASH2
+echo $PWD1 | $REENC $DEV -q --protection-mode noop $FAST_PBKDF_ARGON --sector-size 1024 || fail
+check_hash $PWD1 $HASH2
+echo $PWD1 | $REENC $DEV -q -s 128 -c aes-cbc-plain --protection-mode checksum --sector-size 512 $FAST_PBKDF_ARGON || fail
 check_hash $PWD1 $HASH2
 echo "[OK]"
 
