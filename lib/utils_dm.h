@@ -149,7 +149,7 @@ void dm_targets_free(struct crypt_dm_active_device *dmd);
 
 int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_size,
 	struct device *data_device, struct volume_key *vk, const char *cipher,
-	const char *mode, size_t iv_offset, size_t data_offset, const char *integrity,
+	size_t iv_offset, size_t data_offset, const char *integrity,
 	uint32_t tag_size, uint32_t sector_size);
 int dm_verity_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_size,
 	struct device *data_device, struct device *hash_device, struct device *fec_device,

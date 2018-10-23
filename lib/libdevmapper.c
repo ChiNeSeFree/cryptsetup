@@ -1333,6 +1333,7 @@ static void _dm_target_free_query_path(struct dm_target *tgt)
 	switch(tgt->type) {
 	case DM_CRYPT:
 		crypt_free_volume_key(tgt->u.crypt.vk);
+		free(CONST_CAST(void*)tgt->u.crypt.cipher);
 		break;
 	case DM_INTEGRITY:
 		free(CONST_CAST(void*)tgt->u.integrity.integrity);
@@ -1363,7 +1364,6 @@ static void _dm_target_free(struct dm_target *tgt)
 {
 	switch(tgt->type) {
 	case DM_CRYPT:
-		free(CONST_CAST(void*)tgt->u.crypt.cipher);
 		free(CONST_CAST(void*)tgt->u.crypt.integrity);
 		/* fall through */
 	case DM_VERITY:
@@ -2572,26 +2572,15 @@ int dm_is_dm_kernel_name(const char *name)
 
 int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_size,
 	struct device *data_device, struct volume_key *vk, const char *cipher,
-	const char *mode, size_t iv_offset, size_t data_offset, const char *integrity, uint32_t tag_size,
+	size_t iv_offset, size_t data_offset, const char *integrity, uint32_t tag_size,
 	uint32_t sector_size)
 {
 	int r = -EINVAL;
 
 	/* free on error */
-	char *dm_cipher = NULL;
 	char *dm_integrity = NULL;
 
 	memset(tgt, 0, sizeof(struct dm_target));
-
-	if (mode)
-		r = asprintf(&dm_cipher, "%s-%s", cipher, mode);
-	else
-		r = asprintf(&dm_cipher, "%s", cipher);
-
-	if (r < 0) {
-		r = -ENOMEM;
-		goto err;
-	}
 
 	if (tag_size) {
 		/* Space for IV metadata only */
@@ -2609,7 +2598,7 @@ int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_siz
 	tgt->offset = seg_offset;
 	tgt->size = seg_size;
 
-	tgt->u.crypt.cipher = dm_cipher;
+	tgt->u.crypt.cipher = cipher;
 	tgt->u.crypt.integrity = dm_integrity;
 	tgt->u.crypt.iv_offset = iv_offset;
 	tgt->u.crypt.offset = data_offset;
@@ -2619,7 +2608,6 @@ int dm_crypt_target_set(struct dm_target *tgt, size_t seg_offset, size_t seg_siz
 	return 0;
 err:
 	free(dm_integrity);
-	free(dm_cipher);
 
 	return r;
 }

@@ -203,7 +203,6 @@ int LOOPAES_activate(struct crypt_device *cd,
 		     struct volume_key *vk,
 		     uint32_t flags)
 {
-	const char *p_cipher, *mode;
 	char *cipher = NULL;
 	uint32_t req_flags, dmc_flags;
 	int r;
@@ -220,22 +219,20 @@ int LOOPAES_activate(struct crypt_device *cd,
 
 	if (keys_count == 1) {
 		req_flags = DM_PLAIN64_SUPPORTED;
-		mode = "cbc-plain64";
-		p_cipher = base_cipher;
-	} else {
-		req_flags = DM_LMK_SUPPORTED;
-		mode = "cbc-lmk";
-		r = asprintf(&cipher, "%s:%d", base_cipher, 64);
+		r = asprintf(&cipher, "%s-%s", base_cipher, "cbc-plain64");
 		if (r < 0)
 			return -ENOMEM;
-		p_cipher = cipher;
+	} else {
+		req_flags = DM_LMK_SUPPORTED;
+		r = asprintf(&cipher, "%s:%d-%s", base_cipher, 64, "cbc-lmk");
+		if (r < 0)
+			return -ENOMEM;
 	}
 
 	r = dm_crypt_target_set(&dmd.segment[0], 0, dmd.size,
 			    crypt_data_device(cd),
 			    vk,
-			    p_cipher,
-			    mode,
+			    cipher,
 			    crypt_get_iv_offset(cd),
 			    crypt_get_data_offset(cd),
 			    crypt_get_integrity(cd),

@@ -722,7 +722,7 @@ int TCRYPT_activate(struct crypt_device *cd,
 		     struct crypt_params_tcrypt *params,
 		     uint32_t flags)
 {
-	char dm_name[PATH_MAX], dm_dev_name[PATH_MAX];
+	char dm_name[PATH_MAX], dm_dev_name[PATH_MAX], cipher_spec[MAX_CIPHER_LEN*2+1];
 	char *part_path;
 	unsigned int i;
 	int r;
@@ -835,11 +835,16 @@ int TCRYPT_activate(struct crypt_device *cd,
 			offset = 0;
 		}
 
+		r = snprintf(cipher_spec, sizeof(cipher_spec), "%s-%s", algs->cipher[i-1].name, algs->mode);
+		if (r < 0 || (size_t)r >= sizeof(cipher_spec)) {
+			r = -ENOMEM;
+			break;
+		}
+
 		r = dm_crypt_target_set(&dmd.segment[0], 0, dmd.size,
 				    ptr_dev,
 				    vk,
-				    algs->cipher[i-1].name,
-				    algs->mode,
+				    cipher_spec,
 				    crypt_get_iv_offset(cd),
 				    offset,
 				    crypt_get_integrity(cd),

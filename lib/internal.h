@@ -188,6 +188,7 @@ int PLAIN_activate(struct crypt_device *cd,
 		     uint32_t flags);
 
 void *crypt_get_hdr(struct crypt_device *cd, const char *type);
+const char *crypt_get_cipher_spec(struct crypt_device *cd);
 
 int crypt_wipe_device(struct crypt_device *cd,
 	struct device *device,

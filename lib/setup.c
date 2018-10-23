@@ -60,6 +60,7 @@ struct crypt_device {
 	union {
 	struct { /* used in CRYPT_LUKS1 */
 		struct luks_phdr hdr;
+		char *cipher_spec;
 	} luks1;
 	struct { /* used in CRYPT_LUKS2 */
 		struct luks2_hdr hdr;
@@ -68,8 +69,9 @@ struct crypt_device {
 	} luks2;
 	struct { /* used in CRYPT_PLAIN */
 		struct crypt_params_plain hdr;
+		char *cipher_spec;
 		char *cipher;
-		char *cipher_mode;
+		const char *cipher_mode;
 		unsigned int key_size;
 	} plain;
 	struct { /* used in CRYPT_LOOPAES */
@@ -494,8 +496,7 @@ int PLAIN_activate(struct crypt_device *cd,
 	r = dm_crypt_target_set(dmd.segment, 0, dmd.size,
 			    crypt_data_device(cd),
 			    vk,
-			    crypt_get_cipher(cd),
-			    crypt_get_cipher_mode(cd),
+			    crypt_get_cipher_spec(cd),
 			    crypt_get_iv_offset(cd),
 			    crypt_get_data_offset(cd),
 			    crypt_get_integrity(cd),
@@ -695,6 +696,7 @@ static void _luks2_reload(struct crypt_device *cd)
 static int _crypt_load_luks(struct crypt_device *cd, const char *requested_type,
 			    int require_header, int repair)
 {
+	char *cipher_spec;
 	struct luks_phdr hdr = {};
 	int r, version = 0;
 
@@ -736,6 +738,14 @@ static int _crypt_load_luks(struct crypt_device *cd, const char *requested_type,
 				goto out;
 			}
 		}
+
+		if (asprintf(&cipher_spec, "%s-%s", hdr.cipherName, hdr.cipherMode) < 0) {
+			r = -ENOMEM;
+			goto out;
+		}
+
+		free(cd->u.luks1.cipher_spec);
+		cd->u.luks1.cipher_spec = cipher_spec;
 
 		memcpy(&cd->u.luks1.hdr, &hdr, sizeof(hdr));
 	} else if (isLUKS2(requested_type) || version == 2 || version == 0) {
@@ -993,7 +1003,9 @@ static void crypt_free_type(struct crypt_device *cd)
 	if (isPLAIN(cd->type)) {
 		free(CONST_CAST(void*)cd->u.plain.hdr.hash);
 		free(cd->u.plain.cipher);
-		free(cd->u.plain.cipher_mode);
+		free(cd->u.plain.cipher_spec);
+	} else if (isLUKS1(cd->type)) {
+		free(cd->u.luks1.cipher_spec);
 	} else if (isLUKS2(cd->type)) {
 		LUKS2_hdr_free(&cd->u.luks2.hdr);
 	} else if (isLOOPAES(cd->type)) {
@@ -1075,7 +1087,11 @@ static int _init_by_name_crypt(struct crypt_device *cd, const char *name)
 		cd->u.plain.hdr.sector_size = tgt->u.crypt.sector_size;
 		cd->u.plain.key_size = tgt->u.crypt.vk->keylength;
 		cd->u.plain.cipher = strdup(cipher);
-		cd->u.plain.cipher_mode = strdup(cipher_mode);
+		if (asprintf(&cd->u.plain.cipher_spec, "%s-%s", cipher, cipher_mode) < 0)
+			cd->u.plain.cipher_spec = NULL;
+		else
+			cd->u.plain.cipher_mode = cd->u.plain.cipher_spec + strlen(cipher) + 1;
+		cd->u.plain.cipher = strdup(cipher);
 	} else if (isLOOPAES(cd->type)) {
 		cd->u.loopaes.hdr.offset = tgt->u.crypt.offset;
 		cd->u.loopaes.cipher = strdup(cipher);
@@ -1361,9 +1377,12 @@ static int _crypt_format_plain(struct crypt_device *cd,
 	if (!cd->volume_key)
 		return -ENOMEM;
 
+	if (asprintf(&cd->u.plain.cipher_spec, "%s-%s", cipher, cipher_mode) < 0) {
+		cd->u.plain.cipher_spec = NULL;
+		return -ENOMEM;
+	}
 	cd->u.plain.cipher = strdup(cipher);
-	cd->u.plain.cipher_mode = strdup(cipher_mode);
-
+	cd->u.plain.cipher_mode = cd->u.plain.cipher_spec + strlen(cipher) + 1;
 
 	if (params && params->hash)
 		cd->u.plain.hdr.hash = strdup(params->hash);
@@ -1373,7 +1392,7 @@ static int _crypt_format_plain(struct crypt_device *cd,
 	cd->u.plain.hdr.size = params ? params->size : 0;
 	cd->u.plain.hdr.sector_size = sector_size;
 
-	if (!cd->u.plain.cipher || !cd->u.plain.cipher_mode)
+	if (!cd->u.plain.cipher)
 		return -ENOMEM;
 
 	return 0;
@@ -1440,6 +1459,11 @@ static int _crypt_format_luks1(struct crypt_device *cd,
 	r = LUKS_check_cipher(cd, volume_key_size, cipher, cipher_mode);
 	if (r < 0)
 		return r;
+
+	if (asprintf(&cd->u.luks1.cipher_spec, "%s-%s", cipher, cipher_mode) < 0) {
+		cd->u.luks1.cipher_spec = NULL;
+		return -ENOMEM;
+	}
 
 	r = LUKS_generate_phdr(&cd->u.luks1.hdr, cd->volume_key, cipher, cipher_mode,
 			       cd->pbkdf.hash, uuid, LUKS_STRIPES,
@@ -3626,6 +3650,23 @@ int crypt_dump(struct crypt_device *cd)
 
 	log_err(cd, _("Dump operation is not supported for this device type."));
 	return -EINVAL;
+}
+
+const char *crypt_get_cipher_spec(struct crypt_device *cd)
+{
+	if (!cd)
+		return NULL;
+
+	if (isPLAIN(cd->type))
+		return cd->u.plain.cipher_spec;
+
+	if (isLUKS1(cd->type))
+		return cd->u.luks1.cipher_spec;
+
+	if (isLUKS2(cd->type))
+		return LUKS2_get_cipher(&cd->u.luks2.hdr, CRYPT_DEFAULT_SEGMENT);
+
+	return NULL;
 }
 
 const char *crypt_get_cipher(struct crypt_device *cd)
