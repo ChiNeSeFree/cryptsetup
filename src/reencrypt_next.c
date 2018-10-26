@@ -56,6 +56,10 @@ static int opt_sector_size = 0;
 static const char *opt_reduce_size_str = NULL;
 static uint64_t opt_reduce_size = 0;
 
+/* TODO: This requires support in API so that we can set exact data_offset in LUKS2 header */
+static const char *opt_offset_str = NULL;
+static uint64_t opt_offset = 0;
+
 static const char *opt_device_size_str = NULL;
 static uint64_t opt_device_size = 0;
 
@@ -154,7 +158,7 @@ static int action_reencrypt_next(const char *device)
 	if (r != new_ks)
 		goto err;
 
-	r = crypt_reencrypt_init(cd, new_ks, "reencrypt", cipher, mode, 0, &luks2_params);
+	r = crypt_reencrypt_init(cd, new_ks, "reencrypt", cipher, mode, -(opt_reduce_size / SECTOR_SIZE), &luks2_params);
 	if (r < 0)
 		goto err;
 
@@ -173,8 +177,12 @@ static int action_reencrypt_next(const char *device)
 		goto err;
 	}
 
-	reenc_params.protection = opt_protection_mode;
-	reenc_params.hash = opt_protection_hash;
+	if (opt_reduce_size) {
+		reenc_params.protection = "data_shift";
+	} else {
+		reenc_params.protection = opt_protection_mode;
+		reenc_params.hash = opt_protection_hash;
+	}
 
 	if (!opt_init_only) {
 		set_int_handler(0);
@@ -254,16 +262,24 @@ static int action_encrypt(const char *device)
 	struct stat st;
 	struct crypt_params_reencrypt reenc_params = {};
 	struct crypt_params_luks2 luks2_params = {
-		.data_alignment = opt_reduce_size / (2 * SECTOR_SIZE),
 		.data_device = device,
 		.sector_size = opt_sector_size ?: SECTOR_SIZE
 	};
 
 	/* Twice default LUKS2 header size */
-	if (opt_reduce_size < (8 * 1024 * 1024) && !opt_header_device) {
+	if (!opt_offset && opt_reduce_size < (8 * 1024 * 1024) && !opt_header_device) {
 		log_err(_("Minimal reduce size is 8 MiBs (%d sectors)"), 8 * 1024 * 2);
 		return -EINVAL;
 	}
+
+	/* if (opt_reduce_size && !opt_header_device)
+		luks2_params.data_alignment = opt_reduce_size / (2 * SECTOR_SIZE); */
+	if (!opt_header_device)
+		luks2_params.data_alignment = 0;
+	else if (opt_reduce_size)
+		luks2_params.data_alignment = opt_reduce_size / SECTOR_SIZE;
+	else
+		luks2_params.data_alignment = opt_offset / SECTOR_SIZE;
 
 	r = crypt_parse_name_and_mode(opt_cipher ?: DEFAULT_CIPHER(LUKS1),
 				      cipher, NULL, cipher_mode);
@@ -323,9 +339,13 @@ static int action_encrypt(const char *device)
 	if (r < 0)
 		goto err;
 	keyslot = r;
-	if (!opt_header_device) {
-		data_shift = -(int64_t)luks2_params.data_alignment;
-		crypt_set_data_device(cd, device);
+	if (!opt_header_device && !opt_offset) {
+		data_shift = -(int64_t)(opt_reduce_size / (2*SECTOR_SIZE));
+		if (crypt_set_data_device(cd, device) < 0) {
+			log_err("cant set data device.");
+			r = -EINVAL;
+			goto err;
+		}
 	} else
 		data_shift = 0;
 
@@ -346,8 +366,11 @@ static int action_encrypt(const char *device)
 			goto err;
 		}
 		unlink(header_file);
+	}
+
+	if (opt_reduce_size)
 		reenc_params.protection = "data_shift";
-	} else {
+	else {
 		reenc_params.protection = opt_protection_mode;
 		reenc_params.hash = opt_protection_hash;
 	}
@@ -505,6 +528,7 @@ int main(int argc, const char **argv)
 		{ "device-size",       '\0', POPT_ARG_STRING, &opt_device_size_str,     0, N_("Use only specified device size (ignore rest of device). DANGEROUS!"), N_("bytes") },
 		{ "new",               'N',  POPT_ARG_NONE, &opt_new,                   0, N_("Create new header on not encrypted device."), NULL },
 		{ "reduce-device-size",'\0', POPT_ARG_STRING, &opt_reduce_size_str,     0, N_("Reduce data device size (move data offset). DANGEROUS!"), N_("bytes") },
+		{ "offset",	       '\0', POPT_ARG_STRING, &opt_offset_str,		0, N_("Exact data offet where data to be encrypted starts. DANGEROUS!"), N_("bytes") },
 		{ "pbkdf",             '\0', POPT_ARG_STRING, &opt_pbkdf,               0, N_("PBKDF algorithm (for LUKS2) (argon2i/argon2id/pbkdf2)."), NULL },
 		{ "pbkdf-memory",      '\0', POPT_ARG_LONG, &opt_pbkdf_memory,          0, N_("PBKDF memory cost limit"), N_("kilobytes") },
 		{ "pbkdf-parallel",    '\0', POPT_ARG_LONG, &opt_pbkdf_parallel,        0, N_("PBKDF parallel cost "), N_("threads") },
@@ -597,19 +621,31 @@ int main(int argc, const char **argv)
 		usage(popt_context, EXIT_FAILURE, _("Invalid device size specification."),
 		      poptGetInvocationName(popt_context));
 
+	if (opt_offset_str &&
+	    tools_string_to_size(NULL, opt_offset_str, &opt_offset))
+		usage(popt_context, EXIT_FAILURE, _("Invalid offset specification."),
+		      poptGetInvocationName(popt_context));
+	if (opt_offset % SECTOR_SIZE)
+		usage(popt_context, EXIT_FAILURE, _("Offset must be multiple of 512 bytes sector."),
+		      poptGetInvocationName(popt_context));
+
 	if (opt_reduce_size_str &&
 	    tools_string_to_size(NULL, opt_reduce_size_str, &opt_reduce_size))
 		usage(popt_context, EXIT_FAILURE, _("Invalid device size specification."),
 		      poptGetInvocationName(popt_context));
-	if (opt_reduce_size > 512 * 1024 * 1024)
-		usage(popt_context, EXIT_FAILURE, _("Maximum device reduce size is 64 MiB."),
+	if (opt_reduce_size > 1024 * 1024 * 1024)
+		usage(popt_context, EXIT_FAILURE, _("Maximum device reduce size is 1 GiB."),
 		      poptGetInvocationName(popt_context));
 	if (opt_reduce_size % SECTOR_SIZE)
 		usage(popt_context, EXIT_FAILURE, _("Reduce size must be multiple of 512 bytes sector."),
 		      poptGetInvocationName(popt_context));
 
-	if (opt_new && !(opt_reduce_size || opt_header_device))
-		usage(popt_context, EXIT_FAILURE, _("Option --new must be used together with --reduce-device-size or --header."),
+	if (opt_offset && opt_reduce_size)
+		usage(popt_context, EXIT_FAILURE, _("Parameters --offset and --reduce-device-size can not be used together."),
+		      poptGetInvocationName(popt_context));
+
+	if (opt_new && !(opt_reduce_size || opt_header_device || opt_offset))
+		usage(popt_context, EXIT_FAILURE, _("Option --new must be used together with --reduce-device-size, --header or --offset."),
 		      poptGetInvocationName(popt_context));
 
 	if (opt_sector_size &&

@@ -437,11 +437,14 @@ const char *LUKS2_reencrypt_segment_cipher_new(struct luks2_hdr *hdr);
 const char *LUKS2_reencrypt_segment_cipher_old(struct luks2_hdr *hdr);
 int LUKS2_reencrypt_get_sector_size_new(struct luks2_hdr *hdr);
 int LUKS2_reencrypt_get_sector_size_old(struct luks2_hdr *hdr);
+uint64_t LUKS2_reencrypt_get_data_offset_new(struct luks2_hdr *hdr);
+uint64_t LUKS2_reencrypt_get_data_offset_old(struct luks2_hdr *hdr);
 int LUKS2_reencrypt_digest_new(struct luks2_hdr *hdr);
 int LUKS2_reencrypt_digest_old(struct luks2_hdr *hdr);
 const char *LUKS2_reencrypt_protection_type(struct luks2_hdr *hdr);
 const char *LUKS2_reencrypt_protection_hash(struct luks2_hdr *hdr);
 uint32_t LUKS2_reencrypt_protection_sector_size(struct luks2_hdr *hdr);
+int64_t LUKS2_reencrypt_data_dev_diff(struct luks2_hdr *hdr);
 int64_t LUKS2_reencrypt_data_shift(struct luks2_hdr *hdr);
 const char *LUKS2_reencrypt_mode(struct luks2_hdr *hdr);
 

@@ -372,31 +372,6 @@ static uint64_t get_first_data_offset(json_object *jobj_segs, const char *type)
 	return min;
 }
 
-/* use only on already validated 'segments' object */
-static uint64_t get_last_data_offset(json_object *jobj_segs, const char *type)
-{
-	json_object *jobj_offset, *jobj_type;
-	uint64_t tmp, max = 0;
-
-	json_object_object_foreach(jobj_segs, key, val) {
-		UNUSED(key);
-
-		if (type) {
-			json_object_object_get_ex(val, "type", &jobj_type);
-			if (strcmp(type, json_object_get_string(jobj_type)))
-				continue;
-		}
-
-		json_object_object_get_ex(val, "offset", &jobj_offset);
-		tmp = json_object_get_uint64(jobj_offset);
-
-		if (tmp > max)
-			max = tmp;
-	}
-
-	return max;
-}
-
 static json_bool validate_json_uint32(json_object *jobj)
 {
 	int64_t tmp;
@@ -1796,29 +1771,10 @@ luks2_reencrypt_info LUKS2_reenc_status(struct luks2_hdr *hdr)
 	return REENCRYPT_CRASH;
 }
 
-static int _offset_encrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t *reencrypt_length, uint64_t *offset)
+static int _offset_backward_moved(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t *reencrypt_length, int64_t data_shift, uint64_t *offset)
 {
-	json_object *jobj_segment;
 	uint64_t data_offset, tmp, linear_length = 0;
 	int sg, segs = json_segments_count(jobj_segments);
-	int64_t data_shift = LUKS2_reencrypt_data_shift(hdr);
-
-	/* encryption without data shift (w/ detached header) */
-	if (!data_shift) {
-		jobj_segment = json_segments_get_segment(jobj_segments, 0);
-		/* first segment is not crypt? we just started */
-		if (strcmp(json_segment_type(jobj_segment), "crypt")) {
-			*offset = 0;
-			return 0;
-		}
-
-		if (segs == 2) {
-			*offset = json_segment_get_size(jobj_segment, 0);
-			return 0;
-		}
-
-		return -EINVAL;
-	}
 
 	/* find reencrypt offset with data shift */
 	for (sg = 0; sg < segs; sg++)
@@ -1850,57 +1806,45 @@ static int _offset_encrypt(struct luks2_hdr *hdr, json_object *jobj_segments, ui
 	return -EINVAL;
 }
 
-static int _offset_reencrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t *offset)
+static int _offset_forward(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t *offset)
 {
-	uint64_t tmp;
 	int segs = json_segments_count(jobj_segments);
 
-	if (segs == 1) {
+	if (segs == 1)
 		*offset = 0;
-		return 0;
-	}
-
-	tmp = get_last_data_offset(jobj_segments, "crypt");
-	if (tmp < LUKS2_get_data_offset(hdr) << SECTOR_SHIFT)
+	else if (segs == 2) {
+		*offset = json_segment_get_size(json_segments_get_segment(jobj_segments, 0), 0);
+		if (!*offset)
+			return -EINVAL;
+	} else
 		return -EINVAL;
 
-	*offset = tmp - (LUKS2_get_data_offset(hdr) << SECTOR_SHIFT);
 	return 0;
 }
 
-static int _offset_decrypt(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t device_size, uint64_t *reencrypt_length, uint64_t *offset)
+static int _offset_backward(struct luks2_hdr *hdr, json_object *jobj_segments, uint64_t device_size, uint64_t length, uint64_t *offset)
 {
-	json_object *jobj_segment;
 	int segs = json_segments_count(jobj_segments);
-	int64_t data_shift = LUKS2_reencrypt_data_shift(hdr);
 
-	if (data_shift)
-		return -ENOTSUP;
-
-	jobj_segment = json_segments_get_segment(jobj_segments, 0);
-	if (strcmp(json_segment_type(jobj_segment), "crypt")) {
-		log_dbg("Internal error. First segment must be crypt.");
-		return -EINVAL;
-	}
-
-	if (segs == 2) {
-		*offset = json_segment_get_size(jobj_segment, 0);
-		return 0;
-	} else if (segs == 1) {
-		if (device_size < *reencrypt_length)
+	if (segs == 1) {
+		if (device_size < length)
 			return -EINVAL;
-		*offset = device_size - *reencrypt_length;
-		return 0;
+		*offset = device_size - length;
+	} else if (segs == 2) {
+		*offset = json_segment_get_size(json_segments_get_segment(jobj_segments, 0), 0);
 	} else
 		return -EINVAL;
+
+	return 0;
 }
 
 /* must be always relative to data offset */
 /* the LUKS2 header MUST be valid */
-int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_size, uint64_t *reencrypt_length, uint64_t *offset)
+int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int direction, uint64_t device_size, uint64_t *reencrypt_length, uint64_t *offset)
 {
 	int sg;
 	json_object *jobj_segments;
+	int64_t data_shift = LUKS2_reencrypt_data_shift(hdr);
 
 	if (!offset)
 		return -EINVAL;
@@ -1913,17 +1857,16 @@ int LUKS2_get_reencrypt_offset(struct luks2_hdr *hdr, int mode, uint64_t device_
 		return 0;
 	}
 
-	switch (mode) {
-	case REENCRYPT:
-		return _offset_reencrypt(hdr, jobj_segments, offset);
-	case ENCRYPT:
-		return _offset_encrypt(hdr, jobj_segments, reencrypt_length, offset);
-	case DECRYPT:
-		return _offset_decrypt(hdr, jobj_segments, device_size, reencrypt_length, offset);
-	default:
-		log_dbg("Unknown reencryption mode.");
-		return -EINVAL;
+	if (direction == FORWARD)
+		return _offset_forward(hdr, jobj_segments, offset);
+	else if (direction == BACKWARD) {
+		if (!strcmp(LUKS2_reencrypt_mode(hdr), "encrypt"))
+			return _offset_backward_moved(hdr, jobj_segments, reencrypt_length, data_shift, offset);
+		else
+			return _offset_backward(hdr, jobj_segments, device_size, *reencrypt_length, offset);
 	}
+
+	return -EINVAL;
 }
 
 /* TODO: drop this. it's ugly */
