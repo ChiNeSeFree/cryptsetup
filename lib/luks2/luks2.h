@@ -377,11 +377,11 @@ int json_segments_segment_in_reencrypt(json_object *jobj_segments);
 int json_segments_count(json_object *jobj_segments);
 
 json_object *LUKS2_segment_create_crypt(uint64_t offset,
-				  uint64_t iv_offset, uint64_t *length,
+				  uint64_t iv_offset, const uint64_t *length,
 				  const char *cipher, uint32_t blocksize,
 				  unsigned reencryption);
 
-json_object *LUKS2_segment_create_linear(uint64_t offset, uint64_t *length, unsigned reencryption);
+json_object *LUKS2_segment_create_linear(uint64_t offset, const uint64_t *length, unsigned reencryption);
 
 int LUKS2_segment_first_unused_id(struct luks2_hdr *hdr);
 

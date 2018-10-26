@@ -252,7 +252,7 @@ int LUKS2_segment_first_unused_id(struct luks2_hdr *hdr)
 	return last_id + 1;
 }
 
-static json_object *_segment_create_generic(const char *type, uint64_t offset, uint64_t *length)
+static json_object *_segment_create_generic(const char *type, uint64_t offset, const uint64_t *length)
 {
 	json_object *jobj = json_object_new_object();
 	if (!jobj)
@@ -265,7 +265,7 @@ static json_object *_segment_create_generic(const char *type, uint64_t offset, u
 	return jobj;
 }
 
-json_object *LUKS2_segment_create_linear(uint64_t offset, uint64_t *length, unsigned reencryption)
+json_object *LUKS2_segment_create_linear(uint64_t offset, const uint64_t *length, unsigned reencryption)
 {
 	json_object *jobj = _segment_create_generic("linear", offset, length);
 	if (reencryption)
@@ -274,7 +274,7 @@ json_object *LUKS2_segment_create_linear(uint64_t offset, uint64_t *length, unsi
 }
 
 json_object *LUKS2_segment_create_crypt(uint64_t offset,
-				  uint64_t iv_offset, uint64_t *length,
+				  uint64_t iv_offset, const uint64_t *length,
 				  const char *cipher, uint32_t sector_size,
 				  unsigned reencryption)
 {
