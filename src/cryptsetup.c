@@ -531,7 +531,7 @@ static int action_resize(void)
 	if (r)
 		goto out;
 
-	/* FIXME: resize of LUKS2 in metadata? */
+	/* FIXME: LUKS2 may enforce fixed size and it must not be changed */
 	r = crypt_get_active_device(cd, action_argv[0], &cad);
 	if (r)
 		goto out;
@@ -567,6 +567,58 @@ static int action_resize(void)
 
 	if (r >= 0)
 		r = crypt_resize(cd, action_argv[0], opt_size);
+out:
+	crypt_free(cd);
+	return r;
+}
+
+static int action_reload(void)
+{
+	int r;
+	size_t passwordLen;
+	struct crypt_active_device cad;
+	char *password = NULL;
+	struct crypt_device *cd = NULL;
+	uint32_t activate_flags = 0;
+
+	r = crypt_init_by_name_and_header(&cd, action_argv[0], opt_header_device);
+	if (r)
+		goto out;
+
+	_set_activation_flags(&activate_flags);
+	activate_flags |= CRYPT_ACTIVATE_REFRESH | CRYPT_ACTIVATE_SHARED;
+
+	/* try load VK in kernel keyring using token */
+	r = crypt_activate_by_token(cd, action_argv[0], opt_token, NULL,
+				    activate_flags);
+	tools_keyslot_msg(r, UNLOCKED);
+	if (r >= 0 || (r < 0 && opt_token_only))
+		goto out;
+
+	r = tools_get_key(NULL, &password, &passwordLen,
+			  opt_keyfile_offset, opt_keyfile_size, opt_key_file,
+			  opt_timeout, _verify_passphrase(0), 0, cd);
+	if (r < 0)
+		goto out;
+
+	r = crypt_activate_by_passphrase(cd, NULL, opt_key_slot,
+					 password, passwordLen, 0);
+	tools_passphrase_msg(r);
+	tools_keyslot_msg(r, UNLOCKED);
+	if (r < 0) {
+		crypt_safe_free(password);
+		goto out;
+	}
+
+	r = crypt_activate_by_passphrase(cd, action_argv[0], opt_key_slot,
+					 password, passwordLen, activate_flags);
+	crypt_safe_free(password);
+
+	if (r >= 0 && opt_persistent &&
+	    (crypt_get_active_device(cd, action_argv[0], &cad) ||
+	     crypt_persistent_flags_set(cd, CRYPT_FLAGS_ACTIVATION, cad.flags & activate_flags)))
+		log_err(_("Device activated but cannot make flags persistent."));
+
 out:
 	crypt_free(cd);
 	return r;
@@ -2229,6 +2281,7 @@ static struct action_type {
 	{ "open",         action_open,         1, 1, N_("<device> [--type <type>] [<name>]"),N_("open device as mapping <name>") },
 	{ "close",        action_close,        1, 1, N_("<name>"), N_("close device (remove mapping)") },
 	{ "resize",       action_resize,       1, 1, N_("<name>"), N_("resize active device") },
+	{ "reload",       action_reload,       1, 1, N_("<name>"), N_("refresh active device") },
 	{ "status",       action_status,       1, 0, N_("<name>"), N_("show device status") },
 	{ "benchmark",    action_benchmark,    0, 0, N_("[--cipher <cipher>]"), N_("benchmark cipher") },
 	{ "repair",       action_luksRepair,   1, 1, N_("<device>"), N_("try to repair on-disk metadata") },
@@ -2567,14 +2620,14 @@ int main(int argc, const char **argv)
 		      _("Option --shared is allowed only for open of plain device.\n"),
 		      poptGetInvocationName(popt_context));
 
-	if (opt_allow_discards && strcmp(aname, "open"))
+	if (opt_allow_discards && strcmp(aname, "open") && strcmp(aname, "reload"))
 		usage(popt_context, EXIT_FAILURE,
 		      _("Option --allow-discards is allowed only for open operation.\n"),
 		      poptGetInvocationName(popt_context));
 
-	if (opt_persistent && strcmp(aname, "open"))
+	if (opt_persistent && (strcmp(aname, "open") && strcmp(aname, "reload")))
 		usage(popt_context, EXIT_FAILURE,
-		      _("Option --persistent is allowed only for open operation.\n"),
+		      _("Option --persistent is allowed only for open and reload operations.\n"),
 		      poptGetInvocationName(popt_context));
 
 	if (opt_persistent && opt_test_passphrase)
