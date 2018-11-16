@@ -485,7 +485,6 @@ int PLAIN_activate(struct crypt_device *cd,
 		     uint32_t flags)
 {
 	int r;
-	char *dm_cipher = NULL;
 	enum devcheck device_check;
 	struct crypt_dm_active_device dmd = {
 		.target = DM_CRYPT,
@@ -493,7 +492,7 @@ int PLAIN_activate(struct crypt_device *cd,
 		.flags  = flags,
 		.data_device = crypt_data_device(cd),
 		.u.crypt  = {
-			.cipher = NULL,
+			.cipher = crypt_get_cipher_spec(cd),
 			.vk     = vk,
 			.offset = crypt_get_data_offset(cd),
 			.iv_offset = crypt_get_iv_offset(cd),
@@ -511,20 +510,11 @@ int PLAIN_activate(struct crypt_device *cd,
 	if (r)
 		return r;
 
-	if (crypt_get_cipher_mode(cd))
-		r = asprintf(&dm_cipher, "%s-%s", crypt_get_cipher(cd), crypt_get_cipher_mode(cd));
-	else
-		r = asprintf(&dm_cipher, "%s", crypt_get_cipher(cd));
-	if (r < 0)
-		return -ENOMEM;
-
-	dmd.u.crypt.cipher = dm_cipher;
 	log_dbg(cd, "Trying to activate PLAIN device %s using cipher %s.",
 		name, dmd.u.crypt.cipher);
 
 	r = create_or_reload_device(cd, name, CRYPT_PLAIN, &dmd);
 
-	free(dm_cipher);
 	return r;
 }
 
