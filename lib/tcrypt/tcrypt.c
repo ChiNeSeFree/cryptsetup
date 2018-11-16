@@ -523,6 +523,21 @@ out:
 	return r;
 }
 
+static struct tcrypt_algs *TCRYPT_get_algs(const char *cipher, const char *mode)
+{
+	int i;
+
+	if (!cipher || !mode)
+		return NULL;
+
+	for (i = 0; tcrypt_cipher[i].chain_count; i++)
+		if (!strcmp(tcrypt_cipher[i].long_name, cipher) &&
+		    !strcmp(tcrypt_cipher[i].mode, mode))
+		    return &tcrypt_cipher[i];
+
+	return NULL;
+}
+
 static int TCRYPT_init_hdr(struct crypt_device *cd,
 			   struct tcrypt_phdr *hdr,
 			   struct crypt_params_tcrypt *params)
@@ -700,21 +715,6 @@ int TCRYPT_read_phdr(struct crypt_device *cd,
 	if (r < 0)
 		memset(hdr, 0, sizeof (*hdr));
 	return r;
-}
-
-static struct tcrypt_algs *TCRYPT_get_algs(const char *cipher, const char *mode)
-{
-	int i;
-
-	if (!cipher || !mode)
-		return NULL;
-
-	for (i = 0; tcrypt_cipher[i].chain_count; i++)
-		if (!strcmp(tcrypt_cipher[i].long_name, cipher) &&
-		    !strcmp(tcrypt_cipher[i].mode, mode))
-		    return &tcrypt_cipher[i];
-
-	return NULL;
 }
 
 int TCRYPT_activate(struct crypt_device *cd,
