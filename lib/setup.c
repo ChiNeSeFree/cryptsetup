@@ -2296,11 +2296,7 @@ int crypt_resize(struct crypt_device *cd, const char *name, uint64_t new_size)
 	int r;
 
 	/*
-	 * FIXME: check context uuid matches the dm-crypt device uuid.
-	 * 	  Currently it's possible to resize device (name)
-	 * 	  unrelated to device loaded in context.
-	 *
-	 *	  Also with LUKS2 we must not allow resize when there's
+	 * FIXME: Also with LUKS2 we must not allow resize when there's
 	 *	  explicit size stored in metadata (length != "dynamic")
 	 */
 
@@ -2310,18 +2306,21 @@ int crypt_resize(struct crypt_device *cd, const char *name, uint64_t new_size)
 
 	log_dbg(cd, "Resizing device %s to %" PRIu64 " sectors.", name, new_size);
 
-	r = dm_query_device(cd, name, DM_ACTIVE_DEVICE | DM_ACTIVE_CRYPT_CIPHER |
-				  DM_ACTIVE_UUID | DM_ACTIVE_CRYPT_KEYSIZE |
-				  DM_ACTIVE_CRYPT_KEY, &dmd);
+	r = dm_query_device(cd, name, DM_ACTIVE_CRYPT_KEYSIZE | DM_ACTIVE_CRYPT_KEY, &dmd);
 	if (r < 0) {
 		log_err(cd, _("Device %s is not active."), name);
 		return -EINVAL;
 	}
 
-	if (!dmd.uuid || dmd.target != DM_CRYPT) {
+	if (dmd.target != DM_CRYPT) {
 		r = -EINVAL;
 		goto out;
 	}
+
+	dmd.uuid = crypt_get_uuid(cd);
+	dmd.data_device = crypt_data_device(cd);
+	dmd.u.crypt.cipher = crypt_get_cipher_spec(cd);
+	dmd.u.crypt.integrity = crypt_get_integrity(cd);
 
 	if ((dmd.flags & CRYPT_ACTIVATE_KEYRING_KEY) && !crypt_key_in_keyring(cd)) {
 		r = -EPERM;
@@ -2367,21 +2366,17 @@ int crypt_resize(struct crypt_device *cd, const char *name, uint64_t new_size)
 		r = 0;
 	} else {
 		dmd.size = new_size;
+		dmd.flags |= CRYPT_ACTIVATE_REFRESH | CRYPT_ACTIVATE_SHARED;
 		if (isTCRYPT(cd->type))
 			r = -ENOTSUP;
 		else if (isLUKS2(cd->type))
 			r = LUKS2_unmet_requirements(cd, &cd->u.luks2.hdr, 0, 0);
 		if (!r)
-			r = dm_reload_device(cd, name, &dmd, 1);
+			r = _reload_device(cd, name, cd->type, &dmd);
 	}
 out:
-	if (dmd.target == DM_CRYPT) {
+	if (dmd.target == DM_CRYPT)
 		crypt_free_volume_key(dmd.u.crypt.vk);
-		free(CONST_CAST(void*)dmd.u.crypt.cipher);
-		free(CONST_CAST(void*)dmd.u.crypt.integrity);
-	}
-	device_free(cd, dmd.data_device);
-	free(CONST_CAST(void*)dmd.uuid);
 
 	return r;
 }
