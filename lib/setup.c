@@ -64,6 +64,7 @@ struct crypt_device {
 	union {
 	struct { /* used in CRYPT_LUKS1 */
 		struct luks_phdr hdr;
+		char *cipher_spec;
 	} luks1;
 	struct { /* used in CRYPT_LUKS2 */
 		struct luks2_hdr hdr;
@@ -72,14 +73,16 @@ struct crypt_device {
 	} luks2;
 	struct { /* used in CRYPT_PLAIN */
 		struct crypt_params_plain hdr;
+		char *cipher_spec;
 		char *cipher;
-		char *cipher_mode;
+		const char *cipher_mode;
 		unsigned int key_size;
 	} plain;
 	struct { /* used in CRYPT_LOOPAES */
 		struct crypt_params_loopaes hdr;
+		char *cipher_spec;
 		char *cipher;
-		char *cipher_mode;
+		const char *cipher_mode;
 		unsigned int key_size;
 	} loopaes;
 	struct { /* used in CRYPT_VERITY */
@@ -92,6 +95,7 @@ struct crypt_device {
 	struct { /* used in CRYPT_TCRYPT */
 		struct crypt_params_tcrypt params;
 		struct tcrypt_phdr hdr;
+		const char *cipher_spec;
 	} tcrypt;
 	struct { /* used in CRYPT_INTEGRITY */
 		struct crypt_params_integrity params;
@@ -101,8 +105,9 @@ struct crypt_device {
 	struct { /* used if initialized without header by name */
 		char *active_name;
 		/* buffers, must refresh from kernel on every query */
+		char cipher_spec[MAX_CIPHER_LEN*2+1];
 		char cipher[MAX_CIPHER_LEN];
-		char cipher_mode[MAX_CIPHER_LEN];
+		const char *cipher_mode;
 		unsigned int key_size;
 	} none;
 	} u;
@@ -728,6 +733,7 @@ static void _luks2_reload(struct crypt_device *cd)
 static int _crypt_load_luks(struct crypt_device *cd, const char *requested_type,
 			    int require_header, int repair)
 {
+	char *cipher_spec;
 	struct luks_phdr hdr = {};
 	int r, version = 0;
 
@@ -769,6 +775,14 @@ static int _crypt_load_luks(struct crypt_device *cd, const char *requested_type,
 				goto out;
 			}
 		}
+
+		if (asprintf(&cipher_spec, "%s-%s", hdr.cipherName, hdr.cipherMode) < 0) {
+			r = -ENOMEM;
+			goto out;
+		}
+
+		free(cd->u.luks1.cipher_spec);
+		cd->u.luks1.cipher_spec = cipher_spec;
 
 		memcpy(&cd->u.luks1.hdr, &hdr, sizeof(hdr));
 	} else if (isLUKS2(requested_type) || version == 2 || version == 0) {
@@ -815,7 +829,7 @@ static int _crypt_load_tcrypt(struct crypt_device *cd, struct crypt_params_tcryp
 
 	memcpy(&cd->u.tcrypt.params, params, sizeof(*params));
 
-	r = TCRYPT_read_phdr(cd, &cd->u.tcrypt.hdr, &cd->u.tcrypt.params);
+	r = TCRYPT_read_phdr(cd, &cd->u.tcrypt.hdr, &cd->u.tcrypt.params, &cd->u.tcrypt.cipher_spec);
 
 	cd->u.tcrypt.params.passphrase = NULL;
 	cd->u.tcrypt.params.passphrase_size = 0;
@@ -991,6 +1005,7 @@ int crypt_load(struct crypt_device *cd,
  */
 static int _init_by_name_crypt_none(struct crypt_device *cd)
 {
+	char _mode[MAX_CIPHER_LEN];
 	struct crypt_dm_active_device dmd = {};
 	int r;
 
@@ -1003,10 +1018,13 @@ static int _init_by_name_crypt_none(struct crypt_device *cd)
 	if (r >= 0)
 		r = crypt_parse_name_and_mode(dmd.u.crypt.cipher,
 					      cd->u.none.cipher, NULL,
-					      cd->u.none.cipher_mode);
+					      _mode);
 
-	if (!r)
+	if (!r) {
+		sprintf(cd->u.none.cipher_spec, "%s-%s", cd->u.none.cipher, _mode);
+		cd->u.none.cipher_mode = cd->u.none.cipher_spec + strlen(cd->u.none.cipher) + 1;
 		cd->u.none.key_size = dmd.u.crypt.vk->keylength;
+	}
 
 	crypt_free_volume_key(dmd.u.crypt.vk);
 	free(CONST_CAST(void*)dmd.u.crypt.cipher);
@@ -1031,12 +1049,15 @@ static void crypt_free_type(struct crypt_device *cd)
 	if (isPLAIN(cd->type)) {
 		free(CONST_CAST(void*)cd->u.plain.hdr.hash);
 		free(cd->u.plain.cipher);
-		free(cd->u.plain.cipher_mode);
+		free(cd->u.plain.cipher_spec);
 	} else if (isLUKS2(cd->type)) {
 		LUKS2_hdr_free(cd, &cd->u.luks2.hdr);
+	} else if (isLUKS1(cd->type)) {
+		free(cd->u.luks1.cipher_spec);
 	} else if (isLOOPAES(cd->type)) {
 		free(CONST_CAST(void*)cd->u.loopaes.hdr.hash);
 		free(cd->u.loopaes.cipher);
+		free(cd->u.loopaes.cipher_spec);
 	} else if (isVERITY(cd->type)) {
 		free(CONST_CAST(void*)cd->u.verity.hdr.hash_name);
 		free(CONST_CAST(void*)cd->u.verity.hdr.data_device);
@@ -1063,7 +1084,7 @@ static void crypt_free_type(struct crypt_device *cd)
 static int _init_by_name_crypt(struct crypt_device *cd, const char *name)
 {
 	struct crypt_dm_active_device dmd = {}, dmdi = {};
-	char cipher[MAX_CIPHER_LEN], cipher_mode[MAX_CIPHER_LEN];
+	char *cipher_spec = NULL, cipher[MAX_CIPHER_LEN], cipher_mode[MAX_CIPHER_LEN];
 	const char *namei;
 	int key_nums, r;
 
@@ -1093,6 +1114,12 @@ static int _init_by_name_crypt(struct crypt_device *cd, const char *name)
 			device_free(cd, dmdi.data_device);
 	}
 
+	if (asprintf(&cipher_spec, "%s-%s", cipher, cipher_mode) < 0) {
+		cipher_spec = NULL;
+		r = -ENOMEM;
+		goto out;
+	}
+
 	if (isPLAIN(cd->type)) {
 		cd->u.plain.hdr.hash = NULL; /* no way to get this */
 		cd->u.plain.hdr.offset = dmd.u.crypt.offset;
@@ -1100,11 +1127,15 @@ static int _init_by_name_crypt(struct crypt_device *cd, const char *name)
 		cd->u.plain.hdr.sector_size = dmd.u.crypt.sector_size;
 		cd->u.plain.key_size = dmd.u.crypt.vk->keylength;
 		cd->u.plain.cipher = strdup(cipher);
-		cd->u.plain.cipher_mode = strdup(cipher_mode);
+		cd->u.plain.cipher_spec = cipher_spec;
+		cd->u.plain.cipher_mode = cipher_spec + strlen(cipher) + 1;
+		cipher_spec = NULL;
 	} else if (isLOOPAES(cd->type)) {
 		cd->u.loopaes.hdr.offset = dmd.u.crypt.offset;
 		cd->u.loopaes.cipher = strdup(cipher);
-		cd->u.loopaes.cipher_mode = strdup(cipher_mode);
+		cd->u.loopaes.cipher_spec = cipher_spec;
+		cd->u.loopaes.cipher_mode = cipher_spec + strlen(cipher) + 1;
+		cipher_spec = NULL;
 		/* version 3 uses last key for IV */
 		if (dmd.u.crypt.vk->keylength % key_nums)
 			key_nums++;
@@ -1134,7 +1165,8 @@ static int _init_by_name_crypt(struct crypt_device *cd, const char *name)
 		}
 	} else if (isTCRYPT(cd->type)) {
 		r = TCRYPT_init_by_name(cd, name, &dmd, &cd->device,
-					&cd->u.tcrypt.params, &cd->u.tcrypt.hdr);
+					&cd->u.tcrypt.params, &cd->u.tcrypt.hdr,
+					&cd->u.tcrypt.cipher_spec);
 	}
 out:
 	crypt_free_volume_key(dmd.u.crypt.vk);
@@ -1142,6 +1174,7 @@ out:
 	free(CONST_CAST(void*)dmd.u.crypt.cipher);
 	free(CONST_CAST(void*)dmd.u.crypt.integrity);
 	free(CONST_CAST(void*)dmd.uuid);
+	free(cipher_spec);
 	return r;
 }
 
@@ -1410,9 +1443,12 @@ static int _crypt_format_plain(struct crypt_device *cd,
 	if (!cd->volume_key)
 		return -ENOMEM;
 
+	if (asprintf(&cd->u.plain.cipher_spec, "%s-%s", cipher, cipher_mode) < 0) {
+		cd->u.plain.cipher_spec = NULL;
+		return -ENOMEM;
+	}
 	cd->u.plain.cipher = strdup(cipher);
-	cd->u.plain.cipher_mode = strdup(cipher_mode);
-
+	cd->u.plain.cipher_mode = cd->u.plain.cipher_spec + strlen(cipher) + 1;
 
 	if (params && params->hash)
 		cd->u.plain.hdr.hash = strdup(params->hash);
@@ -1422,7 +1458,7 @@ static int _crypt_format_plain(struct crypt_device *cd,
 	cd->u.plain.hdr.size = params ? params->size : 0;
 	cd->u.plain.hdr.sector_size = sector_size;
 
-	if (!cd->u.plain.cipher || !cd->u.plain.cipher_mode)
+	if (!cd->u.plain.cipher)
 		return -ENOMEM;
 
 	return 0;
@@ -1504,6 +1540,11 @@ static int _crypt_format_luks1(struct crypt_device *cd,
 	r = LUKS_check_cipher(cd, volume_key_size, cipher, cipher_mode);
 	if (r < 0)
 		return r;
+
+	if (asprintf(&cd->u.luks1.cipher_spec, "%s-%s", cipher, cipher_mode) < 0) {
+		cd->u.luks1.cipher_spec = NULL;
+		return -ENOMEM;
+	}
 
 	r = LUKS_generate_phdr(&cd->u.luks1.hdr, cd->volume_key, cipher, cipher_mode,
 			       cd->pbkdf.hash, uuid,
@@ -3873,6 +3914,26 @@ int crypt_dump(struct crypt_device *cd)
 
 	log_err(cd, _("Dump operation is not supported for this device type."));
 	return -EINVAL;
+}
+
+const char *crypt_get_cipher_spec(struct crypt_device *cd)
+{
+	if (!cd)
+		return NULL;
+	else if (isLUKS2(cd->type))
+		return LUKS2_get_cipher(&cd->u.luks2.hdr, CRYPT_DEFAULT_SEGMENT);
+	else if (isLUKS1(cd->type))
+		return cd->u.luks1.cipher_spec;
+	else if (isTCRYPT(cd->type))
+		return cd->u.tcrypt.cipher_spec;
+	else if (isPLAIN(cd->type))
+		return cd->u.plain.cipher_spec;
+	else if (isLOOPAES(cd->type))
+		return cd->u.loopaes.cipher_spec;
+	else if (!cd->type && !_init_by_name_crypt_none(cd))
+		return cd->u.none.cipher_spec;
+
+	return NULL;
 }
 
 const char *crypt_get_cipher(struct crypt_device *cd)

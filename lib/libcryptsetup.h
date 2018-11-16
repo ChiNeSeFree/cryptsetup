@@ -1353,6 +1353,16 @@ crypt_status_info crypt_status(struct crypt_device *cd, const char *name);
 int crypt_dump(struct crypt_device *cd);
 
 /**
+ * Get compact cipher and mode used in device.
+ *
+ * @param cd crypt device handle
+ *
+ * @return used cipher and mode, e.g. "aes-xts-plain64" or @e NULL otherwise
+ *
+ */
+const char *crypt_get_cipher_spec(struct crypt_device *cd);
+
+/**
  * Get cipher used in device.
  *
  * @param cd crypt device handle

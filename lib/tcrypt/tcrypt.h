@@ -80,13 +80,15 @@ struct device;
 
 int TCRYPT_read_phdr(struct crypt_device *cd,
 		     struct tcrypt_phdr *hdr,
-		     struct crypt_params_tcrypt *params);
+		     struct crypt_params_tcrypt *params,
+		     const char **cipher_spec);
 
 int TCRYPT_init_by_name(struct crypt_device *cd, const char *name,
 			const struct crypt_dm_active_device *dmd,
 			struct device **device,
 			struct crypt_params_tcrypt *tcrypt_params,
-			struct tcrypt_phdr *tcrypt_hdr);
+			struct tcrypt_phdr *tcrypt_hdr,
+			const char **cipher_spec);
 
 int TCRYPT_activate(struct crypt_device *cd,
 		     const char *name,

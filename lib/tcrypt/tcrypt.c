@@ -541,8 +541,10 @@ static struct tcrypt_algs *TCRYPT_get_algs(const char *cipher, const char *mode)
 
 static int TCRYPT_init_hdr(struct crypt_device *cd,
 			   struct tcrypt_phdr *hdr,
-			   struct crypt_params_tcrypt *params)
+			   struct crypt_params_tcrypt *params,
+			   const char **cipher_spec)
 {
+	const struct tcrypt_algs *algs;
 	unsigned char pwd[TCRYPT_KEY_POOL_LEN] = {};
 	size_t passphrase_size;
 	char *key;
@@ -635,6 +637,9 @@ static int TCRYPT_init_hdr(struct crypt_device *cd,
 			hdr->d.mk_offset, hdr->d.hidden_volume_size, hdr->d.volume_size);
 		log_dbg(cd, "TCRYPT: Header cipher %s-%s, key size %zu",
 			params->cipher, params->mode, params->key_size);
+
+		algs = TCRYPT_get_algs(params->cipher, params->mode);
+		*cipher_spec = algs ? algs->long_spec : NULL;
 	}
 out:
 	crypt_memzero(pwd, TCRYPT_KEY_POOL_LEN);
@@ -646,7 +651,8 @@ out:
 
 int TCRYPT_read_phdr(struct crypt_device *cd,
 		     struct tcrypt_phdr *hdr,
-		     struct crypt_params_tcrypt *params)
+		     struct crypt_params_tcrypt *params,
+		     const char **cipher_spec)
 {
 	struct device *base_device, *device = crypt_metadata_device(cd);
 	ssize_t hdr_size = sizeof(struct tcrypt_phdr);
@@ -685,32 +691,32 @@ int TCRYPT_read_phdr(struct crypt_device *cd,
 		if (read_lseek_blockwise(devfd, device_block_size(cd, device),
 			device_alignment(device), hdr, hdr_size,
 			TCRYPT_HDR_SYSTEM_OFFSET) == hdr_size) {
-			r = TCRYPT_init_hdr(cd, hdr, params);
+			r = TCRYPT_init_hdr(cd, hdr, params, cipher_spec);
 		}
 	} else if (params->flags & CRYPT_TCRYPT_HIDDEN_HEADER) {
 		if (params->flags & CRYPT_TCRYPT_BACKUP_HEADER) {
 			if (read_lseek_blockwise(devfd, device_block_size(cd, device),
 				device_alignment(device), hdr, hdr_size,
 				TCRYPT_HDR_HIDDEN_OFFSET_BCK) == hdr_size)
-				r = TCRYPT_init_hdr(cd, hdr, params);
+				r = TCRYPT_init_hdr(cd, hdr, params, cipher_spec);
 		} else {
 			if (read_lseek_blockwise(devfd, device_block_size(cd, device),
 				device_alignment(device), hdr, hdr_size,
 				TCRYPT_HDR_HIDDEN_OFFSET) == hdr_size)
-				r = TCRYPT_init_hdr(cd, hdr, params);
+				r = TCRYPT_init_hdr(cd, hdr, params, cipher_spec);
 			if (r && read_lseek_blockwise(devfd, device_block_size(cd, device),
 				device_alignment(device), hdr, hdr_size,
 				TCRYPT_HDR_HIDDEN_OFFSET_OLD) == hdr_size)
-				r = TCRYPT_init_hdr(cd, hdr, params);
+				r = TCRYPT_init_hdr(cd, hdr, params, cipher_spec);
 		}
 	} else if (params->flags & CRYPT_TCRYPT_BACKUP_HEADER) {
 		if (read_lseek_blockwise(devfd, device_block_size(cd, device),
 			device_alignment(device), hdr, hdr_size,
 			TCRYPT_HDR_OFFSET_BCK) == hdr_size)
-			r = TCRYPT_init_hdr(cd, hdr, params);
+			r = TCRYPT_init_hdr(cd, hdr, params, cipher_spec);
 	} else if (read_blockwise(devfd, device_block_size(cd, device),
 			device_alignment(device), hdr, hdr_size) == hdr_size)
-		r = TCRYPT_init_hdr(cd, hdr, params);
+		r = TCRYPT_init_hdr(cd, hdr, params, cipher_spec);
 
 	close(devfd);
 	if (r < 0)
@@ -962,7 +968,8 @@ int TCRYPT_init_by_name(struct crypt_device *cd, const char *name,
 			const struct crypt_dm_active_device *dmd,
 			struct device **device,
 			struct crypt_params_tcrypt *tcrypt_params,
-			struct tcrypt_phdr *tcrypt_hdr)
+			struct tcrypt_phdr *tcrypt_hdr,
+			const char **cipher_spec)
 {
 	struct tcrypt_algs *algs;
 	char cipher[MAX_CIPHER_LEN * 4], mode[MAX_CIPHER_LEN+1], *tmp;
@@ -999,6 +1006,7 @@ int TCRYPT_init_by_name(struct crypt_device *cd, const char *name,
 	tcrypt_params->key_size = algs->chain_key_size;
 	tcrypt_params->cipher = algs->long_name;
 	tcrypt_params->mode = algs->mode;
+	*cipher_spec = algs->long_spec;
 	return 0;
 }
 
